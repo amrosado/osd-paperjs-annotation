@@ -37,12 +37,12 @@
  */
 
 
-import { OpenSeadragon } from './osd-loader.mjs';
-import { FeatureCollectionUI } from './featurecollectionui.mjs';
-import { domObjectFromHTML } from './utils/domObjectFromHTML.mjs';
-import { datastore } from './utils/datastore.mjs';
-import { DragAndDrop } from './utils/draganddrop.mjs';
-import { IconFactory } from './utils/faIcon.mjs';
+import { OpenSeadragon } from './osd-loader';
+import { FeatureCollectionUI } from './featurecollectionui';
+import { domObjectFromHTML } from './utils/domObjectFromHTML';
+import { datastore } from './utils/datastore';
+import { DragAndDrop } from './utils/draganddrop';
+import { IconFactory } from './utils/faIcon';
 
 /**
  * A user interface for managing layers of feature collections.

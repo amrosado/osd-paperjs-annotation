@@ -37,12 +37,12 @@
  */
 
 
-import { ToolBase } from '../../papertools/base.mjs';
-import { PaperOverlay } from '../../paper-overlay.mjs';
-import { OpenSeadragon } from '../../osd-loader.mjs';
-import { paper } from '../../paperjs.mjs';
-import { changeDpiBlob } from './changedpi.mjs';
-import { domObjectFromHTML } from '../../utils/domObjectFromHTML.mjs';
+import { ToolBase } from '../../papertools/base';
+import { PaperOverlay } from '../../paper-overlay';
+import { OpenSeadragon } from '../../osd-loader';
+import { paper } from '../../paperjs';
+import { changeDpiBlob } from './changedpi';
+import { domObjectFromHTML } from '../../utils/domObjectFromHTML';
 
 class ScreenshotOverlay{
     /**

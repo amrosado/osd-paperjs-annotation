@@ -36,15 +36,15 @@
  * 
  */
 
-import { FeatureUI } from './featureui.mjs';
-import { EditableContent } from './utils/editablecontent.mjs';
-import { domObjectFromHTML } from './utils/domObjectFromHTML.mjs';
-import { datastore } from './utils/datastore.mjs';
-import { DragAndDrop } from './utils/draganddrop.mjs';
-import { Placeholder } from './paperitems/placeholder.mjs';
-import { OpenSeadragon } from './osd-loader.mjs';
-import { convertFaIcons } from './utils/faIcon.mjs';
-import { paper } from './paperjs.mjs';
+import { FeatureUI } from './featureui';
+import { EditableContent } from './utils/editablecontent';
+import { domObjectFromHTML } from './utils/domObjectFromHTML';
+import { datastore } from './utils/datastore';
+import { DragAndDrop } from './utils/draganddrop';
+import { Placeholder } from './paperitems/placeholder';
+import { OpenSeadragon } from './osd-loader';
+import { convertFaIcons } from './utils/faIcon';
+import { paper } from './paperjs';
 
 /**
  * A user interface for managing feature collections. The FeatureCollectionUI class provides a user

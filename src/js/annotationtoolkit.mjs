@@ -37,21 +37,21 @@
  */
 
 
-import { OpenSeadragon } from './osd-loader.mjs';
-import { paper } from './paperjs.mjs';
-import { AnnotationUI } from './annotationui.mjs';
-import { PaperOverlay } from './paper-overlay.mjs';
-import { AnnotationItemFactory } from './paperitems/annotationitem.mjs';
-import { MultiPolygon } from './paperitems/multipolygon.mjs';
-import { Placeholder } from './paperitems/placeholder.mjs';
-import { Linestring } from './paperitems/linestring.mjs';
-import { MultiLinestring } from './paperitems/multilinestring.mjs';
-import { Raster } from './paperitems/raster.mjs';
-import { Point } from './paperitems/point.mjs';
-import { PointText } from './paperitems/pointtext.mjs';
-import { Rectangle } from './paperitems/rectangle.mjs';
-import { Ellipse } from './paperitems/ellipse.mjs';
-import { cyrb53 } from './utils/hash.mjs';
+import { OpenSeadragon } from './osd-loader';
+import { paper } from './paperjs';
+import { AnnotationUI } from './annotationui';
+import { PaperOverlay } from './paper-overlay';
+import { AnnotationItemFactory } from './paperitems/annotationitem';
+import { MultiPolygon } from './paperitems/multipolygon';
+import { Placeholder } from './paperitems/placeholder';
+import { Linestring } from './paperitems/linestring';
+import { MultiLinestring } from './paperitems/multilinestring';
+import { Raster } from './paperitems/raster';
+import { Point } from './paperitems/point';
+import { PointText } from './paperitems/pointtext';
+import { Rectangle } from './paperitems/rectangle';
+import { Ellipse } from './paperitems/ellipse';
+import { cyrb53 } from './utils/hash';
 
 //extend paper prototypes to add functionality
 //property definitions
@@ -135,9 +135,12 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         this.viewer = openSeadragonViewer;
         
         // set up overlay. If one is passed in, use it. Otherwise, create one.
+
         if(this.options.overlay){
             if(this.options.overlay instanceof PaperOverlay){
                 this.overlay = this.options.overlay;
+            } else {
+                this.overlay = new PaperOverlay(this.viewer, {type: 'image'});
             }
         } else {
             this.overlay = new PaperOverlay(this.viewer, {type: 'image'});
@@ -255,6 +258,18 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         } catch(e){
             console.error('Error with fetching from cache', e);
         }
+    }
+
+    /**
+     * Setup the annotation UI using previously stored GeoJSON objects
+     * A default group is setup and selected so that the user can begin using
+     * shape tools immediately.
+     * @param {object} options - The options for the annotation UI.
+     */
+    setupEmptyAnnotationUI(options) {
+        let default_group = this._createFeatureCollectionGroup();
+        // this.addFeatureCollections([default_group], false, this.viewer.world.getItemAt(0));
+        default_group.select();
     }
 
     /**
@@ -435,8 +450,9 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         let displayLabel = opts.label;
         
         let parent = opts.parent;
-        if(!parent){
-            let numItems = this.viewer.world.getItemCount();
+        if(!parent) {
+            let numItems = this.viewer.world._items.length;
+            
             if( numItems == 1){
                 parent = this.viewer.world.getItemAt(0).paperLayer;
             } else if (numItems == 0){

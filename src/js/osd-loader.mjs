@@ -35,6 +35,6 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * 
  */
-
+import OpenSeadragon from 'openseadragon';
 let osd = OpenSeadragon;
 export {osd as OpenSeadragon}

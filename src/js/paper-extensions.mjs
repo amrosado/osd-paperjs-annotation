@@ -36,8 +36,8 @@
  * 
  */
 
-import { paper } from './paperjs.mjs';
-import { OpenSeadragon } from './osd-loader.mjs';
+import { paper } from './paperjs';
+import { OpenSeadragon } from './osd-loader';
 
 
 // monkey patch to fix view.zoom when negative scaling is applied
@@ -364,12 +364,24 @@ function applyRescale(){
     let item = this;
     let rescale = item.rescale;
     if(rescale){
-        // // this accounts for view level zoom as well as the scale of the tiled image itself
-        // let zoomFactor = item.hierarchy.reduce((val, item)=>{
-        //     return item.scaling ? item.scaling.x * val : val;
-        // }, 1);
-
-        let zoomFactor = item.view.scaling.x * item.layer.scaling.x;
+        // Calculate zoom factor with null checks and fallbacks
+        let zoomFactor = 1; // Default zoom factor
+        
+        // Try to get zoom factor from view and layer scaling
+        if (item.view && item.view.scaling && item.layer && item.layer.scaling) {
+            zoomFactor = item.view.scaling.x * item.layer.scaling.x;
+        } else if (item.view && item.view.scaling) {
+            // Fallback to just view scaling if layer is not available
+            zoomFactor = item.view.scaling.x;
+        } else if (item.layer && item.layer.scaling) {
+            // Fallback to just layer scaling if view is not available
+            zoomFactor = item.layer.scaling.x;
+        } else {
+            // Fallback to hierarchy-based calculation if both view and layer are unavailable
+            zoomFactor = item.hierarchy.reduce((val, hierarchyItem)=>{
+                return hierarchyItem.scaling ? hierarchyItem.scaling.x * val : val;
+            }, 1);
+        }
         
         Object.keys(rescale).forEach(function(prop){
             if(typeof rescale[prop] ==='function'){

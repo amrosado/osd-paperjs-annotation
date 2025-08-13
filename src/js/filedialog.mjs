@@ -37,10 +37,10 @@
  */
 
 
-import { EditableContent } from "./utils/editablecontent.mjs";
-import { dialog } from "./utils/dialog.mjs";
-import { datastore} from "./utils/datastore.mjs";
-import { paper } from './paperjs.mjs';
+import { EditableContent } from "./utils/editablecontent";
+import { dialog } from "./utils/dialog";
+import { datastore} from "./utils/datastore";
+import { paper } from './paperjs';
 
 /**
  * The FileDialog class provides options for saving and loading feature collections as GeoJSON, exporting them as SVG or PNG files,

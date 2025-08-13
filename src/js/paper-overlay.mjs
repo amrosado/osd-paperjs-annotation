@@ -36,11 +36,15 @@
  * 
  */
 
-import { OpenSeadragon } from './osd-loader.mjs';
-import { paper } from './paperjs.mjs';
-import './paper-extensions.mjs';
-import './osd-extensions.mjs';
-import { makeFaIcon } from './utils/faIcon.mjs';
+import { OpenSeadragon } from './osd-loader';
+import { paper } from './paperjs';
+import './paper-extensions';
+import './osd-extensions';
+import OSDLayer from './osdLayer.mjs';
+import { makeFaIcon } from './utils/faIcon';
+import GeoJS, { geo, util, map, event, feature, createFileReader } from 'geojs';
+
+console.log("OSDLayer", OSDLayer);
         
 (function (OpenSeadragon) {
 
@@ -86,21 +90,21 @@ class PaperOverlay extends OpenSeadragon.EventSource{
     * Creates an instance of the PaperOverlay.
     * overlayType: 'image' to zoom/pan with the image(s), 'viewer' stay fixed.
     * @param {OpenSeadragon.Viewer} viewer - The viewer object.
-    * @param {Object} opts - The options for the overlay.
-    * @param {string} [opts.overlayType='image'] - "image" or "viewer". The type of overlay: 'image' to zoom/pan with the image(s), 'viewer' stay fixed.
+    * @param {Object} osd_opts - The options for the overlay.
+    * @param {string} [osd_opts.overlayType='image'] - "image" or "viewer". The type of overlay: 'image' to zoom/pan with the image(s), 'viewer' stay fixed.
     * @property {OpenSeadragon.Viewer} viewer - The OpenSeadragon viewer object.
     * @property {string} overlayType - "image" or "viewer"
     * @property {paper.Scope} paperScope - the paper.Scope object for this overlay
     */
-    constructor(viewer,opts){
+    constructor(viewer, osd_opts){
         super();
         let defaultOpts = {
             overlayType: 'image',
         }
-        opts=OpenSeadragon.extend(true,defaultOpts,opts);
+        osd_opts=OpenSeadragon.extend(true,defaultOpts,osd_opts);
 
         this.viewer = viewer;
-        this.overlayType = opts.overlayType;
+        this.overlayType = osd_opts.overlayType;
         
         viewer.PaperOverlays.push(this);
 
@@ -136,9 +140,56 @@ class PaperOverlay extends OpenSeadragon.EventSource{
         this.ps = ps;
         this._paperProject=ps.project;
 
-        
-        
         this._resize();
+        
+        if (viewer.world) {
+            this.geojs_map = new map({node: "#osd"});
+            // this.geojs_map_polygons = this.geojs_map.createLayer('osd', {viewer: viewer, opacity: 1});
+            this.geojs_map_polygons = this.geojs_map.createLayer('feature', {features: ['polygon']});
+        }
+
+        // console.log("World", world);
+        
+
+        // if (world && world._contentSize) {
+        //     // let item = viewer.world.getItemAt(0);
+        //     // console.log("Item", item);
+        //     // console.log("World", world);
+        //     // console.log("Source", source);
+        //     let content_size = world._contentSize;
+        //     // let tile_height = viewer.source._tileHeight;
+        //     // let tile_width = viewer.source._tileWidth;
+
+        //     const params = util.pixelCoordinateParams(
+        //         '#osd',
+        //         content_size.x,
+        //         content_size.y,
+        //         240,
+        //         240,
+        //     )
+
+        //     console.log("Params", params);
+
+        //     this.geojs_map = new map({node: "#osd"});
+            
+        //     // Check if 'osd' layer type is registered
+        //     // if (geo && geo.layerTypes && geo.layerTypes()['osd']) {
+        //     //     console.log('OSD layer type is registered, creating OSD layer');
+        //     //     this.geojs_map_polygons = this.geojs_map.createLayer('osd', {viewer: viewer, opacity: 1});
+        //     // } else {
+        //     //     console.warn('OSD layer type not registered, falling back to basic layer');
+        //     //     this.geojs_map_polygons = this.geojs_map.createLayer('feature', {features: ['polygon']});
+        //     // }
+            
+        //     this.geojs_polygons = this.geojs_map.createLayer('feature', {features: ['polygon']});
+        //     this.geo
+
+        //     console.log("GeoJS Map", this.geojs_map);
+        //     console.log("GeoJS Map Polygons", this.geojs_map_polygons);
+        //     console.log("GeoJS Polygons", this.geojs_polygons);
+            
+        //     // this.geojs_polygons.add(new feature.polygon([[0, 0], [1000, 0], [1000, 1000], [0, 1000]]));
+        // }
         
         if(this.overlayType=='image'){
 

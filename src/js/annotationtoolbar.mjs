@@ -37,21 +37,21 @@
  */
 
 
-import { OpenSeadragon } from './osd-loader.mjs';
-import {ToolBase} from './papertools/base.mjs';
-import {DefaultTool} from './papertools/default.mjs';
-import {WandTool} from './papertools/wand.mjs';
-import {BrushTool} from './papertools/brush.mjs';
-import {PointTool} from './papertools/point.mjs';
-import {PointTextTool} from './papertools/pointtext.mjs';
-import {RectangleTool} from './papertools/rectangle.mjs';
-import {EllipseTool} from './papertools/ellipse.mjs';
-import {StyleTool} from './papertools/style.mjs';
-import {LinestringTool} from './papertools/linestring.mjs';
-import {PolygonTool} from './papertools/polygon.mjs';
-import {SelectTool} from './papertools/select.mjs';
-import {TransformTool} from './papertools/transform.mjs';
-import {RasterTool} from './papertools/raster.mjs';
+import { OpenSeadragon } from './osd-loader';
+import {ToolBase} from './papertools/base';
+import {DefaultTool} from './papertools/default';
+import {WandTool} from './papertools/wand';
+import {BrushTool} from './papertools/brush';
+import {PointTool} from './papertools/point';
+import {PointTextTool} from './papertools/pointtext';
+import {RectangleTool} from './papertools/rectangle';
+import {EllipseTool} from './papertools/ellipse';
+import {StyleTool} from './papertools/style';
+import {LinestringTool} from './papertools/linestring';
+import {PolygonTool} from './papertools/polygon';
+import {SelectTool} from './papertools/select';
+import {TransformTool} from './papertools/transform';
+import {RasterTool} from './papertools/raster';
 
 
 

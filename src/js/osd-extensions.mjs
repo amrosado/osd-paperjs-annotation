@@ -36,34 +36,69 @@
  * 
  */
 
-import { PaperOverlay } from "./paper-overlay.mjs";
-import { OpenSeadragon } from "./osd-loader.mjs";
-import { paper } from './paperjs.mjs';
+import { PaperOverlay } from "./paper-overlay";
+import { OpenSeadragon } from "./osd-loader";
+import { paper } from './paperjs';
 
-Object.defineProperty(OpenSeadragon.Viewer.prototype, 'paperLayer', paperLayerDef());
-Object.defineProperty(OpenSeadragon.TiledImage.prototype, 'paperLayer', paperLayerDef());
-Object.defineProperty(OpenSeadragon.Viewport.prototype, 'paperLayer', paperLayerDef());
-Object.defineProperty(OpenSeadragon.TiledImage.prototype, '_paperLayerMap', paperLayerMapDef());
-Object.defineProperty(OpenSeadragon.Viewer.prototype, '_paperLayerMap', paperLayerMapDef());
-Object.defineProperty(OpenSeadragon.Viewport.prototype, '_paperLayerMap', paperLayerMapDef());
-Object.defineProperty(OpenSeadragon.Viewer.prototype, 'paperItems', paperItemsDef());
-Object.defineProperty(OpenSeadragon.TiledImage.prototype, 'paperItems', paperItemsDef());
-Object.defineProperty(OpenSeadragon.Viewport.prototype, 'paperItems', paperItemsDef());
-OpenSeadragon.Viewer.prototype._setupPaper = _setupPaper;
-OpenSeadragon.Viewport.prototype._setupPaper = _setupPaperForViewport;
-OpenSeadragon.TiledImage.prototype._setupPaper = _setupPaperForTiledImage;
-OpenSeadragon.Viewer.prototype.addPaperItem = addPaperItem;
-OpenSeadragon.Viewport.prototype.addPaperItem = addPaperItem;
-OpenSeadragon.TiledImage.prototype.addPaperItem = addPaperItem;
+// Check if properties are already defined to prevent redefinition errors
+if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewer.prototype, 'paperLayer')) {
+    Object.defineProperty(OpenSeadragon.Viewer.prototype, 'paperLayer', paperLayerDef());
+}
+if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.TiledImage.prototype, 'paperLayer')) {
+    Object.defineProperty(OpenSeadragon.TiledImage.prototype, 'paperLayer', paperLayerDef());
+}
+if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewport.prototype, 'paperLayer')) {
+    Object.defineProperty(OpenSeadragon.Viewport.prototype, 'paperLayer', paperLayerDef());
+}
+if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.TiledImage.prototype, '_paperLayerMap')) {
+    Object.defineProperty(OpenSeadragon.TiledImage.prototype, '_paperLayerMap', paperLayerMapDef());
+}
+if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewer.prototype, '_paperLayerMap')) {
+    Object.defineProperty(OpenSeadragon.Viewer.prototype, '_paperLayerMap', paperLayerMapDef());
+}
+if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewport.prototype, '_paperLayerMap')) {
+    Object.defineProperty(OpenSeadragon.Viewport.prototype, '_paperLayerMap', paperLayerMapDef());
+}
+if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewer.prototype, 'paperItems')) {
+    Object.defineProperty(OpenSeadragon.Viewer.prototype, 'paperItems', paperItemsDef());
+}
+if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.TiledImage.prototype, 'paperItems')) {
+    Object.defineProperty(OpenSeadragon.TiledImage.prototype, 'paperItems', paperItemsDef());
+}
+if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewport.prototype, 'paperItems')) {
+    Object.defineProperty(OpenSeadragon.Viewport.prototype, 'paperItems', paperItemsDef());
+}
+
+// Check if methods are already assigned to prevent issues with multiple module loading
+if (!OpenSeadragon.Viewer.prototype._setupPaper) {
+    OpenSeadragon.Viewer.prototype._setupPaper = _setupPaper;
+}
+if (!OpenSeadragon.Viewport.prototype._setupPaper) {
+    OpenSeadragon.Viewport.prototype._setupPaper = _setupPaperForViewport;
+}
+if (!OpenSeadragon.TiledImage.prototype._setupPaper) {
+    OpenSeadragon.TiledImage.prototype._setupPaper = _setupPaperForTiledImage;
+}
+if (!OpenSeadragon.Viewer.prototype.addPaperItem) {
+    OpenSeadragon.Viewer.prototype.addPaperItem = addPaperItem;
+}
+if (!OpenSeadragon.Viewport.prototype.addPaperItem) {
+    OpenSeadragon.Viewport.prototype.addPaperItem = addPaperItem;
+}
+if (!OpenSeadragon.TiledImage.prototype.addPaperItem) {
+    OpenSeadragon.TiledImage.prototype.addPaperItem = addPaperItem;
+}
 
 /**
  * Creates a PaperOverlay for this viewer. See {@link PaperOverlay} for options.
  * @returns {PaperOverlay} The overlay that was created
  */
-OpenSeadragon.Viewer.prototype.createPaperOverlay = function(){ 
-    let overlay = new PaperOverlay(this, ...arguments);
-    return overlay;
-};
+if (!OpenSeadragon.Viewer.prototype.createPaperOverlay) {
+    OpenSeadragon.Viewer.prototype.createPaperOverlay = function(){ 
+        let overlay = new PaperOverlay(this, ...arguments);
+        return overlay;
+    };
+}
 
 /**
  * Define the paperItems property for a tiledImage.

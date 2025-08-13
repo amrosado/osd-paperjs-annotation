@@ -35,7 +35,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * 
  */
+import paper from 'paper';
 
 let _paper = paper;
-
 export { _paper as paper };

@@ -36,11 +36,11 @@
  * 
  */
 
-import {EditableContent} from './utils/editablecontent.mjs';
-import { OpenSeadragon } from './osd-loader.mjs';
-import { domObjectFromHTML } from './utils/domObjectFromHTML.mjs';
-import { datastore } from './utils/datastore.mjs';
-import { convertFaIcons } from './utils/faIcon.mjs';
+import {EditableContent} from './utils/editablecontent';
+import { OpenSeadragon } from './osd-loader';
+import { domObjectFromHTML } from './utils/domObjectFromHTML';
+import { datastore } from './utils/datastore';
+import { convertFaIcons } from './utils/faIcon';
 
 /**
  * A user interface for managing features.

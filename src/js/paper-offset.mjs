@@ -63,7 +63,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-import { paper } from './paperjs.mjs';
+import { paper } from './paperjs';
 
 if(typeof paper==='undefined'){
     console.error('paper-offset.mjs requires paper.js to have been loaded')
