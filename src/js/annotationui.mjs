@@ -38,9 +38,10 @@
 
 //styles in annotationui.css
 
-import { addCSS } from './utils/addcss.mjs';
-import { AnnotationLayout } from './annotationlayout.mjs';
-import { FileDialog } from './filedialog.mjs';
+import { addCSS } from './utils/addcss';
+import { AnnotationToolbar } from './annotationtoolbar';
+import { LayerUI } from './layerui';
+import { FileDialog } from './filedialog';
 
 addCSS('annotationui.css', 'annotationui');
 addCSS('editablecontent.css', 'editablecontent');

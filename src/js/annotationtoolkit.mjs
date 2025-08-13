@@ -37,26 +37,21 @@
  */
 
 
-import { OpenSeadragon } from './osd-loader.mjs';
-import { paper } from './paperjs.mjs';
-import { AnnotationUI } from './annotationui.mjs';
-import { AnnotationToolset } from './annotationtoolset.mjs';
-import { AnnotationToolbar } from './annotationtoolbar.mjs';
-import { LayerUI } from './layerui.mjs';
-import { AnnotationLayout } from './annotationlayout.mjs';
-import { PaperOverlay } from './paper-overlay.mjs';
-import { AnnotationItemFactory } from './paperitems/annotationitem.mjs';
-import { MultiPolygon } from './paperitems/multipolygon.mjs';
-import { Placeholder } from './paperitems/placeholder.mjs';
-import { Linestring } from './paperitems/linestring.mjs';
-import { MultiLinestring } from './paperitems/multilinestring.mjs';
-import { RulerMeasurement } from './paperitems/rulermeasurement.mjs';
-import { Raster } from './paperitems/raster.mjs';
-import { Point } from './paperitems/point.mjs';
-import { PointText } from './paperitems/pointtext.mjs';
-import { Rectangle } from './paperitems/rectangle.mjs';
-import { Ellipse } from './paperitems/ellipse.mjs';
-import { cyrb53 } from './utils/hash.mjs';
+import { OpenSeadragon } from './osd-loader';
+import { paper } from './paperjs';
+import { AnnotationUI } from './annotationui';
+import { PaperOverlay } from './paper-overlay';
+import { AnnotationItemFactory } from './paperitems/annotationitem';
+import { MultiPolygon } from './paperitems/multipolygon';
+import { Placeholder } from './paperitems/placeholder';
+import { Linestring } from './paperitems/linestring';
+import { MultiLinestring } from './paperitems/multilinestring';
+import { Raster } from './paperitems/raster';
+import { Point } from './paperitems/point';
+import { PointText } from './paperitems/pointtext';
+import { Rectangle } from './paperitems/rectangle';
+import { Ellipse } from './paperitems/ellipse';
+import { cyrb53 } from './utils/hash';
 
 //extend paper prototypes to add functionality
 //property definitions

@@ -36,6 +36,7 @@
  * 
  */
 
+<<<<<<< HEAD
 import { AnnotationToolkit } from './annotationtoolkit.mjs';
 import { AnnotationToolset } from './annotationtoolset.mjs';
 import { AnnotationLayout } from './annotationlayout.mjs';
@@ -64,6 +65,33 @@ import { SelectTool } from './papertools/select.mjs';
 import { StyleTool } from './papertools/style.mjs';
 import { TransformTool } from './papertools/transform.mjs';
 import { WandTool } from './papertools/wand.mjs';
+=======
+import { AnnotationToolkit } from './annotationtoolkit';
+import { AnnotationToolbar } from './annotationtoolbar';
+import { FeatureCollectionUI } from './featurecollectionui';
+import { FeatureUI } from './featureui';
+import { FileDialog } from './filedialog';
+import { LayerUI } from './layerui';
+import { PaperOffset } from './paper-offset';
+import { PaperOverlay } from './paper-overlay';
+import { RotationControlOverlay } from './rotationcontrol';
+import { ScreenshotOverlay } from './overlays/screenshot/screenshot';
+import { AnnotationUITool } from './papertools/annotationUITool';
+import { ToolBase } from './papertools/base';
+import { BrushTool } from './papertools/brush';
+import { DefaultTool } from './papertools/default';
+import { EllipseTool } from './papertools/ellipse';
+import { LinestringTool } from './papertools/linestring';
+import { PointTool } from './papertools/point';
+import { PointTextTool } from './papertools/pointtext';
+import { PolygonTool } from './papertools/polygon';
+import { RasterTool } from './papertools/raster';
+import { RectangleTool } from './papertools/rectangle';
+import { SelectTool } from './papertools/select';
+import { StyleTool } from './papertools/style';
+import { TransformTool } from './papertools/transform';
+import { WandTool } from './papertools/wand';
+>>>>>>> 5192dc9 (Pushing changes.)
 
 /**
  *
