@@ -362,6 +362,7 @@ function descendantsDefCompoundPath(){
 
 function applyRescale(){
     let item = this;
+    if (!item.view || !item.layer) return;
     let rescale = item.rescale;
     if(rescale){
         // Calculate zoom factor with null checks and fallbacks
