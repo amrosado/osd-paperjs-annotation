@@ -1,3 +1,4 @@
+import { setup, setupOSDPaperJSAnnotation, OpenSeadragon, paper } from './setup.mjs';
 /**
  * OpenSeadragon paperjs overlay plugin based on paper.js
  * @version 0.5.0
@@ -36,8 +37,15 @@
  * 
  */
 
-<<<<<<< HEAD
 import { AnnotationToolkit } from './annotationtoolkit.mjs';
+import {
+    AnnotationDataStore,
+    annotationDataActions,
+    annotationDataActionTypes,
+    annotationDataReducer,
+    initialAnnotationDataState,
+} from './annotationdatastore.mjs';
+import { GeoJSDisplay } from './geojsdisplay.mjs';
 import { AnnotationToolset } from './annotationtoolset.mjs';
 import { AnnotationLayout } from './annotationlayout.mjs';
 import { AnnotationToolbar } from './annotationtoolbar.mjs';
@@ -65,33 +73,6 @@ import { SelectTool } from './papertools/select.mjs';
 import { StyleTool } from './papertools/style.mjs';
 import { TransformTool } from './papertools/transform.mjs';
 import { WandTool } from './papertools/wand.mjs';
-=======
-import { AnnotationToolkit } from './annotationtoolkit';
-import { AnnotationToolbar } from './annotationtoolbar';
-import { FeatureCollectionUI } from './featurecollectionui';
-import { FeatureUI } from './featureui';
-import { FileDialog } from './filedialog';
-import { LayerUI } from './layerui';
-import { PaperOffset } from './paper-offset';
-import { PaperOverlay } from './paper-overlay';
-import { RotationControlOverlay } from './rotationcontrol';
-import { ScreenshotOverlay } from './overlays/screenshot/screenshot';
-import { AnnotationUITool } from './papertools/annotationUITool';
-import { ToolBase } from './papertools/base';
-import { BrushTool } from './papertools/brush';
-import { DefaultTool } from './papertools/default';
-import { EllipseTool } from './papertools/ellipse';
-import { LinestringTool } from './papertools/linestring';
-import { PointTool } from './papertools/point';
-import { PointTextTool } from './papertools/pointtext';
-import { PolygonTool } from './papertools/polygon';
-import { RasterTool } from './papertools/raster';
-import { RectangleTool } from './papertools/rectangle';
-import { SelectTool } from './papertools/select';
-import { StyleTool } from './papertools/style';
-import { TransformTool } from './papertools/transform';
-import { WandTool } from './papertools/wand';
->>>>>>> 5192dc9 (Pushing changes.)
 
 /**
  *
@@ -101,7 +82,17 @@ import { WandTool } from './papertools/wand';
  */
 
 export const OSDPaperjsAnnotation = {
+    setup: setup,
+    setupOSDPaperJSAnnotation: setupOSDPaperJSAnnotation,
+    OpenSeadragon: OpenSeadragon,
+    paper: paper,
     AnnotationToolkit: AnnotationToolkit,
+    AnnotationDataStore: AnnotationDataStore,
+    annotationDataActions: annotationDataActions,
+    annotationDataActionTypes: annotationDataActionTypes,
+    annotationDataReducer: annotationDataReducer,
+    initialAnnotationDataState: initialAnnotationDataState,
+    GeoJSDisplay: GeoJSDisplay,
     AnnotationToolset: AnnotationToolset,
     AnnotationLayout: AnnotationLayout,
     AnnotationToolbar: AnnotationToolbar,
@@ -135,7 +126,18 @@ export const OSDPaperjsAnnotation = {
 
 // export various classes and functions so they can be imported by name
 export {
+    setup,
+    setupOSDPaperJSAnnotation,
+    OpenSeadragon,
+    paper,
     AnnotationToolkit,
+    AnnotationDataStore,
+    annotationDataActions,
+    annotationDataActionTypes,
+    annotationDataReducer,
+    initialAnnotationDataState,
+    GeoJSDisplay,
+    AnnotationToolset,
     AnnotationLayout,
     AnnotationToolbar,
     FeatureCollectionUI,

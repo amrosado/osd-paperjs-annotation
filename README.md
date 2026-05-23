@@ -38,6 +38,49 @@ See the [JSDoc documentation pages](https://pearcetm.github.io/osd-paperjs-annot
 
 **Tool and project events:** Tools emit `item-created`, `item-updated`, and `item-converted` (and the project re-emits them). Subscribe on a tool or on the project to react to annotation creation and edits. See [docs/tool-and-project-events.md](docs/tool-and-project-events.md).
 
+## Annotation data and Redux
+
+`AnnotationToolkit` keeps annotation data in a single `AnnotationDataStore`. By default this store is local to the toolkit and `toGeoJSON()` reads from that source of truth. Tool edits, imports, deletes, label changes, and cached annotations are synchronized into the store through the library reducer.
+
+To keep all annotation data in a host Redux application, add the exported reducer to your app and pass the store to the toolkit:
+
+```js
+import { configureStore } from '@reduxjs/toolkit';
+import {
+    AnnotationToolkit,
+    annotationDataReducer,
+} from './src/js/osdpaperjsannotation.mjs';
+
+const store = configureStore({
+    reducer: {
+        osdPaperjsAnnotation: annotationDataReducer,
+        // other app reducers...
+    },
+});
+
+const toolkit = new AnnotationToolkit(viewer, {
+    redux: {
+        enabled: true,
+        store,
+        sliceKey: 'osdPaperjsAnnotation',
+    },
+});
+```
+
+If your reducer is mounted under a different key, pass `selector: state => state.annotations` instead of `sliceKey`. The same reducer and action creators are exported as `annotationDataReducer`, `annotationDataActions`, `annotationDataActionTypes`, and `initialAnnotationDataState`.
+
+## GeoJS Display Mode
+
+For large annotation sets, enable `geojs_display` to render display-only annotations through [GeoJS](https://opengeoscience.github.io/geojs/) while keeping Paper.js available for rich editing:
+
+```js
+const toolkit = new AnnotationToolkit(viewer, {
+    geojs_display: true,
+});
+```
+
+When enabled, the toolkit creates a GeoJS overlay above the OpenSeadragon canvas. Imported and edited annotations remain in the toolkit data store, but inactive Paper.js items are hidden and rendered by GeoJS. Clicking a GeoJS-rendered object reveals and selects the corresponding Paper.js item so existing osd-paperjs tools can edit it. Call `toolkit.finishGeoJSDisplayEdit()` to return the active object to GeoJS display mode.
+
 ## Demo pages:
 
 See the [Demo pages](https://pearcetm.github.io/osd-paperjs-annotation/demo/) to try out the functionality.
@@ -69,4 +112,3 @@ Gulp PackUpdater: only updates bundle.js whenever you save a file
 Gulp webpack: updates bundle.js
 Gulp doc: updates documentation
 Gulp Demo: Launches the rotional control demo on a local html address on your default browser
-

@@ -36,68 +36,53 @@
  * 
  */
 
-import { PaperOverlay } from "./paper-overlay";
-import { OpenSeadragon } from "./osd-loader";
-import { paper } from './paperjs';
+import { OpenSeadragon } from './osd-loader.mjs';
+import { paper } from './paperjs.mjs';
 
-// Check if properties are already defined to prevent redefinition errors
-if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewer.prototype, 'paperLayer')) {
-    Object.defineProperty(OpenSeadragon.Viewer.prototype, 'paperLayer', paperLayerDef());
-}
-if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.TiledImage.prototype, 'paperLayer')) {
-    Object.defineProperty(OpenSeadragon.TiledImage.prototype, 'paperLayer', paperLayerDef());
-}
-if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewport.prototype, 'paperLayer')) {
-    Object.defineProperty(OpenSeadragon.Viewport.prototype, 'paperLayer', paperLayerDef());
-}
-if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.TiledImage.prototype, '_paperLayerMap')) {
-    Object.defineProperty(OpenSeadragon.TiledImage.prototype, '_paperLayerMap', paperLayerMapDef());
-}
-if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewer.prototype, '_paperLayerMap')) {
-    Object.defineProperty(OpenSeadragon.Viewer.prototype, '_paperLayerMap', paperLayerMapDef());
-}
-if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewport.prototype, '_paperLayerMap')) {
-    Object.defineProperty(OpenSeadragon.Viewport.prototype, '_paperLayerMap', paperLayerMapDef());
-}
-if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewer.prototype, 'paperItems')) {
-    Object.defineProperty(OpenSeadragon.Viewer.prototype, 'paperItems', paperItemsDef());
-}
-if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.TiledImage.prototype, 'paperItems')) {
-    Object.defineProperty(OpenSeadragon.TiledImage.prototype, 'paperItems', paperItemsDef());
-}
-if (!Object.prototype.hasOwnProperty.call(OpenSeadragon.Viewport.prototype, 'paperItems')) {
-    Object.defineProperty(OpenSeadragon.Viewport.prototype, 'paperItems', paperItemsDef());
+let osdExtensionsInstalled = false;
+let createPaperOverlayInstalled = false;
+
+function definePrototypeProperty(proto, name, descriptor) {
+    if (!Object.prototype.hasOwnProperty.call(proto, name)) {
+        Object.defineProperty(proto, name, descriptor);
+    }
 }
 
-// Check if methods are already assigned to prevent issues with multiple module loading
-if (!OpenSeadragon.Viewer.prototype._setupPaper) {
-    OpenSeadragon.Viewer.prototype._setupPaper = _setupPaper;
-}
-if (!OpenSeadragon.Viewport.prototype._setupPaper) {
-    OpenSeadragon.Viewport.prototype._setupPaper = _setupPaperForViewport;
-}
-if (!OpenSeadragon.TiledImage.prototype._setupPaper) {
-    OpenSeadragon.TiledImage.prototype._setupPaper = _setupPaperForTiledImage;
-}
-if (!OpenSeadragon.Viewer.prototype.addPaperItem) {
-    OpenSeadragon.Viewer.prototype.addPaperItem = addPaperItem;
-}
-if (!OpenSeadragon.Viewport.prototype.addPaperItem) {
-    OpenSeadragon.Viewport.prototype.addPaperItem = addPaperItem;
-}
-if (!OpenSeadragon.TiledImage.prototype.addPaperItem) {
-    OpenSeadragon.TiledImage.prototype.addPaperItem = addPaperItem;
-}
+function installOSDExtensions({ PaperOverlay } = {}) {
+    if (!osdExtensionsInstalled) {
+        osdExtensionsInstalled = true;
 
-/**
- * Creates a PaperOverlay for this viewer. See {@link PaperOverlay} for options.
- * @returns {PaperOverlay} The overlay that was created
- */
-if (!OpenSeadragon.Viewer.prototype.createPaperOverlay) {
-    OpenSeadragon.Viewer.prototype.createPaperOverlay = function(){ 
-        let overlay = new PaperOverlay(this, ...arguments);
-        return overlay;
-    };
+        definePrototypeProperty(OpenSeadragon.Viewer.prototype, 'PaperOverlays', {
+            get: function PaperOverlays(){
+                return this._PaperOverlays || (this._PaperOverlays = []);
+            }
+        });
+        definePrototypeProperty(OpenSeadragon.Viewer.prototype, 'paperLayer', paperLayerDef());
+        definePrototypeProperty(OpenSeadragon.TiledImage.prototype, 'paperLayer', paperLayerDef());
+        definePrototypeProperty(OpenSeadragon.Viewport.prototype, 'paperLayer', paperLayerDef());
+        definePrototypeProperty(OpenSeadragon.TiledImage.prototype, '_paperLayerMap', paperLayerMapDef());
+        definePrototypeProperty(OpenSeadragon.Viewer.prototype, '_paperLayerMap', paperLayerMapDef());
+        definePrototypeProperty(OpenSeadragon.Viewport.prototype, '_paperLayerMap', paperLayerMapDef());
+        definePrototypeProperty(OpenSeadragon.Viewer.prototype, 'paperItems', paperItemsDef());
+        definePrototypeProperty(OpenSeadragon.TiledImage.prototype, 'paperItems', paperItemsDef());
+        definePrototypeProperty(OpenSeadragon.Viewport.prototype, 'paperItems', paperItemsDef());
+
+        OpenSeadragon.Viewer.prototype._setupPaper ||= _setupPaper;
+        OpenSeadragon.Viewport.prototype._setupPaper ||= _setupPaperForViewport;
+        OpenSeadragon.TiledImage.prototype._setupPaper ||= _setupPaperForTiledImage;
+        OpenSeadragon.Viewer.prototype.addPaperItem ||= addPaperItem;
+        OpenSeadragon.Viewport.prototype.addPaperItem ||= addPaperItem;
+        OpenSeadragon.TiledImage.prototype.addPaperItem ||= addPaperItem;
+    }
+
+    if (PaperOverlay && !createPaperOverlayInstalled && !OpenSeadragon.Viewer.prototype.createPaperOverlay) {
+        createPaperOverlayInstalled = true;
+        OpenSeadragon.Viewer.prototype.createPaperOverlay = function(){
+            return new PaperOverlay(this, ...arguments);
+        };
+    }
+
+    return OpenSeadragon;
 }
 
 /**
@@ -184,18 +169,24 @@ function _setupPaperForTiledImage(overlay){
     layer.tiledImage = tiledImage;
     
     function updateMatrix(){
+        const scaleFactor = overlay.scaleFactor;
+        const bounds = _this.getBoundsNoRotate();
+        const sourceWidth = _this.source?.width || _this.source?.dimensions?.x || _this.getContentSize?.().x;
+        if (!isFinitePositive(scaleFactor) || !isFinitePositive(bounds?.width) || !isFinitePositive(sourceWidth)) {
+            return;
+        }
+
         let degrees = _this.getRotation();
-        let bounds = _this.getBoundsNoRotate();
         let flipped = _this.getFlip();
-        let center = new paper.Point((bounds.x+bounds.width/2) * overlay.scaleFactor, (bounds.y+bounds.height/2) * overlay.scaleFactor);
+        let center = new paper.Point((bounds.x+bounds.width/2) * scaleFactor, (bounds.y+bounds.height/2) * scaleFactor);
         let matrix = new paper.Matrix();
 
         if(flipped){
             matrix.scale(-1, 1, center)
         }
         matrix.rotate(degrees, center);
-        matrix.translate({x: bounds.x * overlay.scaleFactor, y: bounds.y * overlay.scaleFactor});
-        matrix.scale(bounds.width * overlay.scaleFactor / _this.source.width );
+        matrix.translate({x: bounds.x * scaleFactor, y: bounds.y * scaleFactor});
+        matrix.scale(bounds.width * scaleFactor / sourceWidth);
         // matrix.scale() // TODO how to flip the coordinates when the tiled image is flipped?
 
         layer.matrix.set(matrix);
@@ -213,16 +204,24 @@ function _setupPaperForViewport(overlay){
     let layer = _setupPaper.call(this, overlay);
     layer.viewport = this;
     
-    layer.matrix.scale(overlay.scaleFactor);
+    updateMatrix();
 
     function updateMatrix(){
+        const scaleFactor = overlay.scaleFactor;
+        if (!isFinitePositive(scaleFactor)) {
+            return;
+        }
         layer.matrix.reset();
-        layer.matrix.scale(overlay.scaleFactor);
+        layer.matrix.scale(scaleFactor);
     }
     
     overlay.addHandler('update-scale',updateMatrix);
 }
 
+
+function isFinitePositive(value){
+    return Number.isFinite(value) && value > 0;
+}
 
 /**
  * @private
@@ -235,3 +234,5 @@ function addPaperItem(item){
         console.error('No layer has been set up in the active paper scope for this object. Does a scope need to be activated?');
     }
 }
+
+export { installOSDExtensions };

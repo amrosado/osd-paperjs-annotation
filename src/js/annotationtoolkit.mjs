@@ -37,39 +37,53 @@
  */
 
 
-import { OpenSeadragon } from './osd-loader';
-import { paper } from './paperjs';
-import { AnnotationUI } from './annotationui';
-import { PaperOverlay } from './paper-overlay';
-import { AnnotationItemFactory } from './paperitems/annotationitem';
-import { MultiPolygon } from './paperitems/multipolygon';
-import { Placeholder } from './paperitems/placeholder';
-import { Linestring } from './paperitems/linestring';
-import { MultiLinestring } from './paperitems/multilinestring';
-import { Raster } from './paperitems/raster';
-import { Point } from './paperitems/point';
-import { PointText } from './paperitems/pointtext';
-import { Rectangle } from './paperitems/rectangle';
-import { Ellipse } from './paperitems/ellipse';
-import { cyrb53 } from './utils/hash';
+import './setup.mjs';
+import { OpenSeadragon } from './osd-loader.mjs';
+import { paper } from './paperjs.mjs';
+import { AnnotationUI } from './annotationui.mjs';
+import { AnnotationLayout } from './annotationlayout.mjs';
+import { AnnotationToolbar } from './annotationtoolbar.mjs';
+import { AnnotationToolset } from './annotationtoolset.mjs';
+import { PaperOverlay } from './paper-overlay.mjs';
+import { AnnotationDataStore } from './annotationdatastore.mjs';
+import { GeoJSDisplay } from './geojsdisplay.mjs';
+import { LayerUI } from './layerui.mjs';
+import { AnnotationItemFactory } from './paperitems/annotationitem.mjs';
+import { MultiPolygon } from './paperitems/multipolygon.mjs';
+import { Placeholder } from './paperitems/placeholder.mjs';
+import { Linestring } from './paperitems/linestring.mjs';
+import { MultiLinestring } from './paperitems/multilinestring.mjs';
+import { RulerMeasurement } from './paperitems/rulermeasurement.mjs';
+import { Raster } from './paperitems/raster.mjs';
+import { Point } from './paperitems/point.mjs';
+import { PointText } from './paperitems/pointtext.mjs';
+import { Rectangle } from './paperitems/rectangle.mjs';
+import { Ellipse } from './paperitems/ellipse.mjs';
+import { cyrb53 } from './utils/hash.mjs';
 
 //extend paper prototypes to add functionality
 //property definitions
 
-Object.defineProperty(paper.Item.prototype, 'displayName', displayNamePropertyDef());
-Object.defineProperty(paper.Item.prototype, 'featureCollection', featureCollectionPropertyDef());
-Object.defineProperty(paper.TextItem.prototype, 'content', textItemContentPropertyDef());
-Object.defineProperty(paper.Project.prototype, 'descendants', descendantsDefProject());
+definePaperPrototypeProperty(paper.Item.prototype, 'displayName', displayNamePropertyDef());
+definePaperPrototypeProperty(paper.Item.prototype, 'featureCollection', featureCollectionPropertyDef());
+definePaperPrototypeProperty(paper.TextItem.prototype, 'content', textItemContentPropertyDef());
+definePaperPrototypeProperty(paper.Project.prototype, 'descendants', descendantsDefProject());
 
 //extend remove function to emit events for GeoJSON type annotation objects
-let origRemove=paper.Item.prototype.remove;
-paper.Item.prototype.remove=function(){
-    const childrenToFireRemove = this.getItems({match: item=>item.isGeoJSONFeatureCollection});
-    (this.isGeoJSONFeature || this.isGeoJSONFeatureCollection) && this.project.emit('item-removed',{item: this});
-    childrenToFireRemove.forEach(fc => this.project.emit('item-removed', {item: fc}));
-    origRemove.call(this);
-    (this.isGeoJSONFeature || this.isGeoJSONFeatureCollection) && this.emit('removed',{item: this});
-    childrenToFireRemove.forEach(fc => fc.emit('removed', {item: fc}));
+const annotationRemoveWrapped = Symbol.for('osd-paperjs-annotation.removeWrapped');
+if (!paper.Item.prototype.remove?.[annotationRemoveWrapped]) {
+    let origRemove=paper.Item.prototype.remove;
+    let annotationRemove = function(){
+        const childrenToFireRemove = this.getItems({match: item=>item.isGeoJSONFeatureCollection});
+        (this.isGeoJSONFeature || this.isGeoJSONFeatureCollection) && this.project.emit('item-removed',{item: this});
+        childrenToFireRemove.forEach(fc => this.project.emit('item-removed', {item: fc}));
+        origRemove.call(this);
+        (this.isGeoJSONFeature || this.isGeoJSONFeatureCollection) && this.emit('removed',{item: this});
+        childrenToFireRemove.forEach(fc => fc.emit('removed', {item: fc}));
+    };
+    annotationRemove[annotationRemoveWrapped] = true;
+    annotationRemove.original = origRemove.original || origRemove;
+    paper.Item.prototype.remove = annotationRemove;
 }
 //function definitions
 paper.Group.prototype.insertChildren=getInsertChildrenDef();
@@ -108,6 +122,10 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
      * @param {object} [opts.overlay] a PaperOverlay object to use
      * @param {object} [opts.destroyOnViewerClose] whether to destroy the toolkit and its overlay when the viewer closes
      * @param {object} [opts.cacheAnnotations] whether to keep annotations in memory for images which aren't currently open
+     * @param {AnnotationDataStore} [opts.dataStore] optional annotation data source of truth.
+     * @param {object|boolean} [opts.geojs_display] true/options to render display annotations with GeoJS and edit selected objects in Paper.js.
+     * @param {object|boolean} [opts.redux] pass `{ enabled: true, store }` to store annotation data in a host Redux reducer.
+     * @param {object} [opts.initialDataState] optional initial state for the local AnnotationDataStore.
      * @param {boolean} [opts.strictGeometry=false] when true, `convertPaperItemToAnnotation` throws if `toGeoJSONGeometry()`
      *   has coordinates whose array nesting does not match RFC 7946 for the declared `geometry.type` (e.g. Polygon vs MultiPolygon).
      *   When false (default), the same mismatch only logs a console warning. Does not replace a full GeoJSON schema validator.
@@ -131,6 +149,10 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
             overlay: null,
             destroyOnViewerClose: false,
             cacheAnnotations: false,
+            dataStore: null,
+            geojs_display: false,
+            redux: false,
+            initialDataState: null,
             strictGeometry: false,
             strictPaperItemContract: false,
             events: {
@@ -169,6 +191,13 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         }
         this.paperScope.project.defaultStyle = new paper.Style();
         this.paperScope.project.defaultStyle.set(this.defaultStyle);
+        this.dataStore = this.options.dataStore instanceof AnnotationDataStore
+            ? this.options.dataStore
+            : new AnnotationDataStore({
+                redux: this.options.redux,
+                initialState: this.options.initialDataState,
+            });
+        this._bindDataStoreEvents();
 
         // set the overlay to auto rescale items
         this.overlay.autoRescaleItems(true);
@@ -209,8 +238,6 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         paper.Item.fromGeoJSON = AnnotationItemFactory.itemFromGeoJSON;
         paper.Item.fromAnnotationItem = AnnotationItemFactory.itemFromAnnotationItem;
 
-        this._cached = {};
-
         if (this.options.addUI) {
             let uiOpts = {};
             if (typeof this.options.addUI === 'object') {
@@ -227,6 +254,10 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
             if (this.options.layout) {
                 this.addAnnotationLayout(this.options.layout === true ? {} : this.options.layout);
             }
+        }
+
+        if (this.options.geojs_display) {
+            this.enableGeoJSDisplay(this.options.geojs_display === true ? {} : this.options.geojs_display);
         }
 
     }
@@ -312,7 +343,7 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
      * Empty any cached annotations
      */
     clearCache(){
-        this._cached = {};
+        this.dataStore.clearCache(null, { source: 'clearCache' });
     }
 
     /**
@@ -323,8 +354,8 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
     _cacheAnnotations(tiledImage){
         try{
             const key = cyrb53(JSON.stringify(tiledImage.source));
-            const featureCollections = tiledImage.paperLayer.getItems({match: item=>item.isGeoJSONFeatureCollection});
-            this._cached[key] = featureCollections;
+            const featureCollections = this.snapshotGeoJSON({ layer: tiledImage.paperLayer });
+            this.dataStore.setCache(key, featureCollections, { source: 'cacheAnnotations' });
         } catch(e){
             console.error('Error with caching', e);
         }
@@ -333,10 +364,8 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
     _loadCachedAnnotations(tiledImage){
         try{
             const key = cyrb53(JSON.stringify(tiledImage.source));
-            const featureCollections = this._cached[key] || [];
-            for(const fcGroup of featureCollections){
-                this._addFeatureCollectionGroupToLayer(fcGroup, tiledImage.paperLayer);
-            }
+            const featureCollections = this.dataStore.getCache(key);
+            if (featureCollections.length) this.loadGeoJSON(featureCollections, false, tiledImage);
         } catch(e){
             console.error('Error with fetching from cache', e);
         }
@@ -495,6 +524,8 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         }
         if (this._toolset) this._toolset.destroy();
         this._toolset = null;
+        this.disableGeoJSDisplay();
+        this.dataStore?.destroy?.();
         this.overlay.destroy();
         this.raiseEvent('destroy');
     }
@@ -515,6 +546,34 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
     setGlobalVisibility(show = false){
         this.paperScope.view._element.setAttribute('style', 'visibility:' + (show ? 'visible;' : 'hidden;'));
     }
+
+    /**
+     * Enable the GeoJS display layer. GeoJS renders normal display objects while Paper.js stays available
+     * for rich editing when a rendered object is clicked.
+     * @param {Object|boolean} [opts={}]
+     * @returns {GeoJSDisplay}
+     */
+    enableGeoJSDisplay(opts = {}) {
+        if (this.geojsDisplay) return this.geojsDisplay;
+        this.geojsDisplay = new GeoJSDisplay(this, opts === true ? {} : opts);
+        return this.geojsDisplay;
+    }
+
+    /**
+     * Disable the GeoJS display layer and restore Paper.js item visibility.
+     */
+    disableGeoJSDisplay() {
+        this.geojsDisplay?.destroy();
+        this.geojsDisplay = null;
+    }
+
+    /**
+     * Finish the currently active Paper.js edit and return that object to GeoJS display mode.
+     */
+    finishGeoJSDisplayEdit() {
+        this.geojsDisplay?.finishPaperEdit();
+    }
+
     /**
      * Add feature collections to the toolkit from GeoJSON objects.
      * @param {object[]} featureCollections - The array of GeoJSON objects representing feature collections.
@@ -564,6 +623,20 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
      * @returns {Object[]} The array of GeoJSON objects representing feature collections.
      */
     toGeoJSON(options){
+        if (!options?.layer) {
+            return this.dataStore.toGeoJSON();
+        }
+        return this.snapshotGeoJSON(options);
+    }
+
+    /**
+     * Snapshot the live Paper.js project to GeoJSON. This is the bridge used by the data store
+     * to stay synchronized with tool-driven edits.
+     * @param {Object} [options]
+     * @param {Layer} [options.layer] The specific layer to use
+     * @returns {Object[]} The array of GeoJSON objects representing feature collections.
+     */
+    snapshotGeoJSON(options){
         const defaults = {
             layer:null,
         }
@@ -594,7 +667,7 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
      * @returns {string} The JSON string representing the feature collections.
      */
     toGeoJSONString(replacer,space){
-        return JSON.stringify(this.toGeoJSON(),replacer,space);
+        return this.dataStore.toGeoJSONString(replacer,space);
     }
     /**
      * Load feature collections from GeoJSON objects and add them to the project.
@@ -603,10 +676,17 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
      * @param {OpenSeadragon.TiledImage | OpenSeadragon.Viewport | false} [parentImage] - Which image (or viewport) to add the object to
      * @param {boolean} [pixelCoordinates]
      */
-    loadGeoJSON(geoJSON, replaceCurrent, parentImage){
+    loadGeoJSON(geoJSON, replaceCurrent, parentImage, internalOptions = {}){
+        if (!internalOptions.skipDataStore) {
+            if (replaceCurrent) {
+                this.dataStore.replaceFeatureCollections(geoJSON, { source: 'loadGeoJSON' });
+            } else {
+                this.dataStore.addFeatureCollections(geoJSON, { source: 'loadGeoJSON' });
+            }
+        }
         let parentLayer = parentImage ? parentImage.paperLayer : false;
         if(replaceCurrent){
-            this.getFeatureCollectionGroups(parentImage).forEach(grp=>grp.remove());
+            this.getFeatureCollectionGroups(parentLayer).forEach(grp=>grp.remove());
         }
         if(!Array.isArray(geoJSON)){
             geoJSON = [geoJSON];
@@ -627,6 +707,7 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
                 console.warn('GeoJSON object not loaded: wrong type. Only FeatureCollection objects are currently supported');
             }
         })
+        this._scheduleDataStoreSync('loadGeoJSON');
     }
 
     /**
@@ -716,6 +797,35 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
     makePlaceholderItem(style){
         return new Placeholder(style);
     }
+
+    _bindDataStoreEvents() {
+        const project = this.paperScope?.project;
+        if (!project) return;
+        [
+            'feature-collection-added',
+            'item-created',
+            'item-updated',
+            'item-converted',
+            'item-removed',
+            'items-changed',
+        ].forEach((eventName) => {
+            project.on(eventName, () => this._scheduleDataStoreSync(eventName));
+        });
+    }
+
+    _scheduleDataStoreSync(reason) {
+        if (!this.dataStore || this._dataStoreSyncPending) return;
+        this._dataStoreSyncPending = true;
+        const sync = () => {
+            this._dataStoreSyncPending = false;
+            this.dataStore.syncFromToolkit(this, { source: reason });
+        };
+        if (typeof queueMicrotask === 'function') {
+            queueMicrotask(sync);
+        } else {
+            globalThis.setTimeout(sync, 0);
+        }
+    }
     
 };
 
@@ -768,6 +878,25 @@ function applyBounds(boundingItems) {
     }
 
 }
+
+function emitSelectionChangedFromItem(item) {
+    const tk = item.project?._scope?.annotationToolkit;
+    if (!tk || !tk._emitIntegrationEvent) return;
+
+    tk._selectedFeatureItems ||= new Set();
+    if (item.selected) {
+        tk._selectedFeatureItems.add(item);
+    } else {
+        tk._selectedFeatureItems.delete(item);
+    }
+
+    const primary = tk._selectedFeatureItems.values().next().value || null;
+    tk._emitIntegrationEvent('selection-changed', {
+        selectedCount: tk._selectedFeatureItems.size,
+        primary,
+    });
+}
+
 /**
  * Select a paper item and emit events.
  * @private
@@ -780,14 +909,7 @@ function paperItemSelect(keepOtherSelectedItems) {
     this.selected = true;
     this.emit('selected');
     this.project.emit('item-selected', { item: this });
-    const tk = this.project?._scope?.annotationToolkit;
-    if (tk && tk._emitIntegrationEvent) {
-        const selected = this.project?._scope?.findSelectedItems?.() ?? [];
-        tk._emitIntegrationEvent('selection-changed', {
-            selectedCount: selected.length,
-            primary: selected.length ? selected[0] : null,
-        });
-    }
+    emitSelectionChangedFromItem(this);
 }
 /**
  * Deselect a paper item and emit events.
@@ -802,14 +924,7 @@ function paperItemDeselect(keepOtherSelectedItems) {
     this.selected = false;
     this.emit('deselected');
     this.project.emit('item-deselected', { item: this });
-    const tk = this.project?._scope?.annotationToolkit;
-    if (tk && tk._emitIntegrationEvent) {
-        const selected = this.project?._scope?.findSelectedItems?.() ?? [];
-        tk._emitIntegrationEvent('selection-changed', {
-            selectedCount: selected.length,
-            primary: selected.length ? selected[0] : null,
-        });
-    }
+    emitSelectionChangedFromItem(this);
 }
 /**
  * Toggle the selection of a paper item and emit events.
@@ -858,6 +973,15 @@ function findSelectedItem() {
  * @property {function} get - The getter function for the display name property.
  *   @returns {string} The display name value.
  */
+function definePaperPrototypeProperty(proto, name, descriptor){
+    const existing = Object.getOwnPropertyDescriptor(proto, name);
+    if (existing && existing.configurable === false) return;
+    Object.defineProperty(proto, name, {
+        configurable: true,
+        ...descriptor,
+    });
+}
+
 function displayNamePropertyDef(){
     return {
         set: function displayName(input){
@@ -870,6 +994,7 @@ function displayNamePropertyDef(){
             }
             this.name = this._displayName;
             this.emit('display-name-changed',{displayName:this._displayName});
+            this.project?._scope?.annotationToolkit?._scheduleDataStoreSync?.('display-name-changed');
         },
         get: function displayName(){
             return this._displayName;

@@ -36,9 +36,20 @@
  * 
  */
 
-import { paper } from './paperjs';
-import { OpenSeadragon } from './osd-loader';
+import { paper } from './paperjs.mjs';
+import { OpenSeadragon } from './osd-loader.mjs';
 
+let paperExtensionsInstalled = false;
+
+function definePrototypeProperty(proto, name, descriptor) {
+    if (!Object.prototype.hasOwnProperty.call(proto, name)) {
+        Object.defineProperty(proto, name, descriptor);
+    }
+}
+
+function installPaperExtensions() {
+    if (paperExtensionsInstalled) return paper;
+    paperExtensionsInstalled = true;
 
 // monkey patch to fix view.zoom when negative scaling is applied
 paper.View.prototype.getZoom = function() {
@@ -58,7 +69,7 @@ paper.CanvasView.prototype._setElementSize.base = function(width, height) {
         if (element.height !== height)
             element.height = height;
     }
-},
+};
 
 /**
  * Sets the rotation of the view.
@@ -101,21 +112,21 @@ paper.View.prototype.getFlipped = function(flipped){
     return this.scaling.x * this.scaling.y < 0;
 }
 
-Object.defineProperty(paper.Item.prototype, 'hierarchy', hierarchyDef());
-Object.defineProperty(paper.Item.prototype, 'descendants', descendantsDef());
-Object.defineProperty(paper.Item.prototype, 'fillOpacity', itemFillOpacityPropertyDef());
-Object.defineProperty(paper.Item.prototype, 'strokeOpacity', itemStrokeOpacityPropertyDef());
-Object.defineProperty(paper.Item.prototype, 'rescale', itemRescalePropertyDef());
-Object.defineProperty(paper.Item.prototype, 'stroke', strokePropertyDefItem());
-Object.defineProperty(paper.Style.prototype, 'fillOpacity', fillOpacityPropertyDef());
-Object.defineProperty(paper.Style.prototype, 'strokeOpacity', strokeOpacityPropertyDef());
-Object.defineProperty(paper.Style.prototype, 'rescale', rescalePropertyDef());
-Object.defineProperty(paper.CompoundPath.prototype, 'descendants', descendantsDefCompoundPath());//this must come after the Item prototype def to override it
-Object.defineProperty(paper.Project.prototype, 'hierarchy', hierarchyDef());
-Object.defineProperty(paper.Project.prototype, 'fillOpacity', itemFillOpacityPropertyDef());
-Object.defineProperty(paper.View.prototype, 'fillOpacity', viewFillOpacityPropertyDef());
-Object.defineProperty(paper.View.prototype, '_fillOpacity',{value: 1, writable: true});//initialize to opaque
-Object.defineProperty(paper.Project.prototype, 'strokeOpacity', itemStrokeOpacityPropertyDef());
+definePrototypeProperty(paper.Item.prototype, 'hierarchy', hierarchyDef());
+definePrototypeProperty(paper.Item.prototype, 'descendants', descendantsDef());
+definePrototypeProperty(paper.Item.prototype, 'fillOpacity', itemFillOpacityPropertyDef());
+definePrototypeProperty(paper.Item.prototype, 'strokeOpacity', itemStrokeOpacityPropertyDef());
+definePrototypeProperty(paper.Item.prototype, 'rescale', itemRescalePropertyDef());
+definePrototypeProperty(paper.Item.prototype, 'stroke', strokePropertyDefItem());
+definePrototypeProperty(paper.Style.prototype, 'fillOpacity', fillOpacityPropertyDef());
+definePrototypeProperty(paper.Style.prototype, 'strokeOpacity', strokeOpacityPropertyDef());
+definePrototypeProperty(paper.Style.prototype, 'rescale', rescalePropertyDef());
+definePrototypeProperty(paper.CompoundPath.prototype, 'descendants', descendantsDefCompoundPath());//this must come after the Item prototype def to override it
+definePrototypeProperty(paper.Project.prototype, 'hierarchy', hierarchyDef());
+definePrototypeProperty(paper.Project.prototype, 'fillOpacity', itemFillOpacityPropertyDef());
+definePrototypeProperty(paper.View.prototype, 'fillOpacity', viewFillOpacityPropertyDef());
+definePrototypeProperty(paper.View.prototype, '_fillOpacity',{value: 1, writable: true});//initialize to opaque
+definePrototypeProperty(paper.Project.prototype, 'strokeOpacity', itemStrokeOpacityPropertyDef());
 
 paper.Item.prototype.updateFillOpacity = updateFillOpacity;
 paper.Item.prototype.updateStrokeOpacity = updateStrokeOpacity;
@@ -123,6 +134,11 @@ paper.Project.prototype.updateFillOpacity = updateFillOpacity;
 paper.View.prototype._multiplyOpacity = true;
 paper.Style.prototype.set= styleSet;
 paper.Item.prototype.applyRescale = applyRescale;
+paper.PathItem.prototype.isClockwise = pathItemIsClockwise;
+definePrototypeProperty(paper.PathItem.prototype, 'clockwise', {get: function cw(){ return this.isClockwise(); }});
+
+return paper;
+}
 
 /**
  * Define the set method for a paper style object.
@@ -410,11 +426,9 @@ function strokePropertyDefItem(){
     }
 }
 
-// patch isClockwise by adding a small epsilon value to account for floating point errors
-paper.PathItem.prototype.isClockwise = function() {
+function pathItemIsClockwise() {
     return this.getArea() >= -0.00000001;
 }
-Object.defineProperty(paper.PathItem.prototype, 'clockwise', {get: function cw(){ return this.isClockwise(); }});
 
 
 
@@ -2258,3 +2272,5 @@ paper.Curve.getTimeOf = function(v, point){
     return t;
     
 }
+
+export { installPaperExtensions };

@@ -62,6 +62,8 @@ class SelectTool extends AnnotationUITool{
         super(paperScope);
         let self=this;
         this.ps = this.project.paperScope;
+        this.usesGeoJSDisplaySelection = true;
+        this._lastSelectionItems = [];
         this.setToolbarControl(new SelectToolbar(this));
         this.registerOverlayCursorOwnedClasses('selectable-layer');
 
@@ -75,6 +77,7 @@ class SelectTool extends AnnotationUITool{
         sr2.visible=false;
         
         this.extensions.onActivate=function(){ 
+            self.geojsDisplay?.finishPaperEdit();
             self.tool.onMouseMove = (ev)=>self.onMouseMove(ev);
             self.clearOverlayCursorOwnedClasses();
         }    
@@ -84,7 +87,7 @@ class SelectTool extends AnnotationUITool{
         }
         this.tool.extensions.onKeyUp=function(ev){
             if(ev.key=='escape'){
-                self.project.paperScope.findSelectedItems().forEach(item=>item.deselect());
+                self.clearSelection();
             }
         }
        
@@ -103,19 +106,17 @@ class SelectTool extends AnnotationUITool{
             selectionRectangle.visible=false;
             sr2.visible=false;
             if (!annotationToolPrimaryButtonDownOrUp(ev)) return;
+            const keepExistingSelection = (ev.modifiers.control || ev.modifiers.meta);
             if(ev.downPoint.subtract(ev.point).length==0){
                 //not a click-and-drag, do element selection
                 let hitResult = self.hitTestPoint(ev);
-                hitResult && self._isItemSelectable(hitResult.item) && hitResult.item.toggle((ev.modifiers.control || ev.modifiers.meta));
+                const hitItems = hitResult && self._isItemSelectable(hitResult.item) ? [hitResult.item] : [];
+                self._applySelectionAction(hitItems, keepExistingSelection, true);
                 
             } else{
                 //click and drag, do area-based selection
                 let hitResults = self.hitTestArea(ev);
-                let keepExistingSelection = (ev.modifiers.control || ev.modifiers.meta);
-                if(!keepExistingSelection){
-                    self.project.paperScope.findSelectedItems().forEach(item=>item.deselect());
-                }
-                hitResults.forEach(item=>item.select(true))
+                self._applySelectionAction(hitResults, keepExistingSelection, false);
                 //limit results to a single layer
                 // hitResults.filter(item=>item.layer === hitResults[0].layer).forEach(item=>item.select(true))
             }
@@ -161,15 +162,16 @@ class SelectTool extends AnnotationUITool{
    * @param {Object} ev - The mouse move event object containing information about the cursor position.
    */
     onMouseMove(ev){
-        if(ev.item && this._isItemSelectable(ev.item)){
-            if(this.currentItem != ev.item) (ev.item.emit('selection:mouseenter')||true) 
-            if(this.currentLayer != ev.item.layer) ev.item.layer.emit('selection:mouseenter');
-            this.currentItem = ev.item;
+        const hoverItem = this._geojsPaperItemAtEvent(ev) || ev.item;
+        if(hoverItem && this._isItemSelectable(hoverItem)){
+            if(this.currentItem != hoverItem) (hoverItem.emit('selection:mouseenter')||true) 
+            if(this.currentLayer != hoverItem.layer) hoverItem.layer.emit('selection:mouseenter');
+            this.currentItem = hoverItem;
             this.currentLayer = this.currentItem.layer;
             this.project.overlay.addClass('selectable-layer')
         }
         else{
-            this.currenItem && (this.currentItem.emit('selection:mouseleave',ev)||true) 
+            this.currentItem && (this.currentItem.emit('selection:mouseleave',ev)||true) 
             this.currentLayer && this.currentLayer.emit('selection:mouseleave',ev);
             this.project.overlay.removeClass('selectable-layer')
             this.currentItem = null;
@@ -184,6 +186,13 @@ class SelectTool extends AnnotationUITool{
      * @returns {HitResult} The hit result object containing information about the hit test.
      */
     hitTestPoint(ev){
+        if (this.selection_action === 'deselect') {
+            const selectedPaperItem = this._paperBoundsItemsAtPoint(ev.point).find((item) => item.selected);
+            if (selectedPaperItem) return { item: selectedPaperItem, paper: true };
+        }
+
+        const geojsItem = this._geojsPaperItemAtEvent(ev);
+        if (geojsItem) return { item: geojsItem, geojs: true };
         let hitResult = this.ps.project.hitTest(ev.point,{
             fill:true,
             stroke:true,
@@ -205,6 +214,17 @@ class SelectTool extends AnnotationUITool{
      * @returns {HitResult[]} An array of hit results containing GeoJSON feature items within the specified area.
      */
     hitTestArea(ev,onlyFullyContained){
+        if (this.geojsDisplay?.enabled) {
+            const geojsItems = this.geojsDisplay.findPaperItemsInProjectRectangle(ev.point, ev.downPoint, onlyFullyContained);
+            const paperItems = this._paperBoundsItemsInRectangle(ev.point, ev.downPoint, onlyFullyContained);
+            if (this.selection_action === 'deselect') {
+                return this._uniqueItems([
+                    ...paperItems.filter((item) => item.selected),
+                    ...geojsItems.filter((item) => item.selected),
+                ]);
+            }
+            return this._uniqueItems([...geojsItems, ...paperItems]);
+        }
         let options = {
             match:item=>item.isGeoJSONFeature,
         }
@@ -219,9 +239,132 @@ class SelectTool extends AnnotationUITool{
         return hitResult;
     }
 
+    get geojsDisplay(){
+        return this.project?.paperScope?.annotationToolkit?.geojsDisplay || null;
+    }
+
+    _geojsPaperItemAtEvent(ev){
+        if (!this.geojsDisplay?.enabled) return null;
+        return this.geojsDisplay.hitTestPaperItemsAtEvent(ev)[0]
+            || this._paperBoundsItemsAtPoint(ev.point)[0]
+            || null;
+    }
+
+    _paperBoundsItemsAtPoint(point){
+        const tolerance = this.getTolerance(5);
+        return this.project.paperScope.annotationToolkit.getFeatures().filter((item) => {
+            const bounds = this._paperItemProjectBounds(item);
+            if (!bounds) return false;
+            const expanded = bounds.clone();
+            expanded.expand(tolerance * 2, tolerance * 2);
+            return expanded.contains(point);
+        });
+    }
+
+    _paperBoundsItemsInRectangle(pointA, pointB, onlyFullyContained){
+        const testRectangle = new paper.Rectangle(pointA, pointB);
+        const tolerance = this.getTolerance(2);
+        testRectangle.expand(tolerance * 2, tolerance * 2);
+        return this.project.paperScope.annotationToolkit.getFeatures().filter((item) => {
+            const itemBounds = this._paperItemProjectBounds(item);
+            if (!itemBounds) return false;
+            return onlyFullyContained
+                ? testRectangle.contains(itemBounds)
+                : testRectangle.intersects(itemBounds) || testRectangle.contains(itemBounds) || itemBounds.contains(testRectangle);
+        });
+    }
+
+    _paperItemProjectBounds(item){
+        const imageBounds = item?.data?.geojsImageBounds;
+        const tiledImage = item?.data?.tiledImage;
+        if (imageBounds && tiledImage) {
+            const values = [imageBounds.left, imageBounds.top, imageBounds.width, imageBounds.height].map(Number);
+            if (values.every(Number.isFinite) && values[2] > 0 && values[3] > 0) {
+                const [left, top, width, height] = values;
+                const layer = tiledImage._paperLayerMap?.get?.(this.project.paperScope) || item.layer || item.parent;
+                const points = [
+                    new paper.Point(left, top),
+                    new paper.Point(left + width, top),
+                    new paper.Point(left + width, top + height),
+                    new paper.Point(left, top + height),
+                ].map((point) => layer?.matrix?.transform ? layer.matrix.transform(point) : point);
+                return this._boundsFromPoints(points);
+            }
+        }
+
+        const bounds = item?.bounds;
+        if (!bounds) return null;
+        return bounds.clone ? bounds.clone() : new paper.Rectangle(bounds.left, bounds.top, bounds.width, bounds.height);
+    }
+
+    _boundsFromPoints(points){
+        const finitePoints = points.filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+        if (!finitePoints.length) return null;
+        const limits = finitePoints.reduce((acc, point) => ({
+            minX: Math.min(acc.minX, point.x),
+            minY: Math.min(acc.minY, point.y),
+            maxX: Math.max(acc.maxX, point.x),
+            maxY: Math.max(acc.maxY, point.y),
+        }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+        return new paper.Rectangle(
+            new paper.Point(limits.minX, limits.minY),
+            new paper.Point(limits.maxX, limits.maxY),
+        );
+    }
+
+    _uniqueItems(items){
+        const seen = new Set();
+        return items.filter((item) => {
+            if (!item || seen.has(item)) return false;
+            seen.add(item);
+            return true;
+        });
+    }
+
+    clearSelection({ notify = true } = {}) {
+        const selectedItems = this.project.paperScope.findSelectedItems()
+            .filter((item) => this._isItemSelectable(item));
+        this._lastSelectionItems = selectedItems;
+        selectedItems.forEach((item) => item.deselect(true));
+        this.geojsDisplay?.scheduleUpdate();
+
+        if (notify && selectedItems.length > 0) {
+            const previousAction = this.selection_action;
+            this.selection_action = 'deselect';
+            this.onSelectionChanged?.();
+            this.selection_action = previousAction;
+        }
+
+        return selectedItems;
+    }
+
+    _applySelectionAction(items, keepExistingSelection, singleClick){
+        const selectableItems = items.filter(item=>item && this._isItemSelectable(item));
+        this._lastSelectionItems = selectableItems;
+        const action = this.selection_action || 'select';
+
+        if (action === 'deselect') {
+            selectableItems.forEach(item=>item.deselect(true));
+            this.onSelectionChanged?.();
+            this.geojsDisplay?.scheduleUpdate();
+            return;
+        }
+
+        if (action === 'select') {
+            if(!keepExistingSelection && selectableItems.length > 0){
+                this.project.paperScope.findSelectedItems().forEach(item=>item.deselect(true));
+            }
+            selectableItems.forEach(item=>item.select(true));
+            this.geojsDisplay?.scheduleUpdate();
+            return;
+        }
+
+        selectableItems.forEach(item=>item.toggle(keepExistingSelection));
+        this.geojsDisplay?.scheduleUpdate();
+    }
+
     _isItemSelectable(item){
-        return true;
-        return (this.items.length==0) || (item.layer == this.targetLayer);
+        return !!item?.isGeoJSONFeature;
     }
 }
 export{SelectTool};
@@ -239,25 +382,12 @@ class SelectToolbar extends AnnotationUIToolbarBase{
         s.setAttribute('data-active', 'select');
         this.dropdown.appendChild(s);
         const span = document.createElement('span');
-        span.innerHTML = '(Ctrl)click to select items.';
+        span.innerHTML = '(Ctrl)click or drag to select items.';
         s.append(span);        
     }
     
     isEnabledForMode(mode){
-        let itemsExist = this.tool.doAnnotationItemsExist();
-        return itemsExist && [
-            'default',
-            'select',
-            'multiselection',
-            'Polygon',
-            'MultiPolygon',
-            'Point:Rectangle',
-            'Point:Ellipse',
-            'Point',
-            'LineString',
-            'MultiLineString',
-            'GeometryColletion:Raster',
-        ].includes(mode);
+        return this.tool.doAnnotationItemsExist();
     }
     
 }

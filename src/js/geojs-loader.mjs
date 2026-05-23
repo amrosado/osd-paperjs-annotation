@@ -1,77 +1,112 @@
 /**
  * GeoJS library loader with fallback support
- * 
+ *
  * This module provides a consistent way to import and access GeoJS
  * across the application, with proper error handling and fallbacks.
  */
 
-import GeoJS from 'geojs';
+import GeoJSDefault from 'geojs';
+import * as GeoJSNamespace from 'geojs';
 
-// Debug what we got from the import
-console.log('geojs-loader: GeoJS import debug:', {
-    GeoJS,
-    hasDefault: 'default' in GeoJS,
-    hasGeo: 'geo' in GeoJS,
-    keys: Object.keys(GeoJS),
-    type: typeof GeoJS
-});
+function valueFromCandidate(candidate, key) {
+    if (!candidate || (typeof candidate !== 'object' && typeof candidate !== 'function')) return undefined;
+    return candidate[key];
+}
 
-// Extract components with fallback strategies
-let geo, util, map, event, feature, featureLayer, createFileReader;
+function normalizeGeoJS(candidate) {
+    if (!candidate) return null;
 
-// Try different extraction strategies
-if (GeoJS.geo) {
-    // Named exports available directly
-    geo = GeoJS.geo;
-    util = GeoJS.util;
-    map = GeoJS.map;
-    event = GeoJS.event;
-    feature = GeoJS.feature;
-    featureLayer = GeoJS.featureLayer;
-    createFileReader = GeoJS.createFileReader;
-    console.log('geojs-loader: Using direct properties from GeoJS');
-} else if (GeoJS.default) {
-    // Check default export
-    geo = GeoJS.default.geo || GeoJS.default;
-    util = GeoJS.default.util;
-    map = GeoJS.default.map;
-    event = GeoJS.default.event;
-    feature = GeoJS.default.feature;
-    featureLayer = GeoJS.default.featureLayer;
-    createFileReader = GeoJS.default.createFileReader;
-    console.log('geojs-loader: Using default export properties');
-} else if (typeof GeoJS === 'object' && GeoJS.registerLayer) {
-    // GeoJS itself is the geo object
-    geo = GeoJS;
-    console.log('geojs-loader: Using GeoJS as geo object directly');
-} else {
+    const nestedGeo = valueFromCandidate(candidate, 'geo');
+    if (nestedGeo) {
+        return {
+            geo: nestedGeo,
+            util: candidate.util ?? nestedGeo.util,
+            map: candidate.map ?? nestedGeo.map,
+            event: candidate.event ?? nestedGeo.event,
+            feature: candidate.feature ?? nestedGeo.feature,
+            featureLayer: candidate.featureLayer ?? nestedGeo.featureLayer,
+            createFileReader: candidate.createFileReader ?? nestedGeo.createFileReader,
+        };
+    }
+
+    if (typeof candidate === 'object' || typeof candidate === 'function') {
+        const defaultExport = valueFromCandidate(candidate, 'default');
+        if (defaultExport && defaultExport !== candidate) {
+            const normalizedDefault = normalizeGeoJS(defaultExport);
+            if (normalizedDefault?.geo) return normalizedDefault;
+        }
+
+        if (candidate.registerLayer || candidate.map || candidate.util) {
+            return {
+                geo: candidate,
+                util: candidate.util,
+                map: candidate.map,
+                event: candidate.event,
+                feature: candidate.feature,
+                featureLayer: candidate.featureLayer,
+                createFileReader: candidate.createFileReader,
+            };
+        }
+    }
+
+    return null;
+}
+
+const candidates = [
+    GeoJSDefault,
+    GeoJSNamespace,
+    GeoJSNamespace.default,
+    globalThis.geo,
+    globalThis.geojs,
+    globalThis.geojs?.geo,
+];
+
+const normalized = candidates.map(normalizeGeoJS).find((item) => item?.geo);
+
+let geo = normalized?.geo;
+let util = normalized?.util;
+let map = normalized?.map;
+let event = normalized?.event;
+let feature = normalized?.feature;
+let featureLayer = normalized?.featureLayer;
+let createFileReader = normalized?.createFileReader;
+
+if (!geo) {
     console.warn('geojs-loader: Could not extract geo object from GeoJS import');
+}
+
+if (geo) {
+    util = util ?? geo.util;
+    map = map ?? geo.map;
+    event = event ?? geo.event;
+    feature = feature ?? geo.feature;
+    featureLayer = featureLayer ?? geo.featureLayer;
+    createFileReader = createFileReader ?? geo.createFileReader;
 }
 
 // Export the core geo object
 export { geo };
 
 // Export other commonly used GeoJS components
-export { 
-    GeoJS as default,
+export {
+    GeoJSDefault as default,
     util,
     map,
     event,
     feature,
     featureLayer,
-    createFileReader
+    createFileReader,
 };
 
 // Validate that GeoJS loaded properly
 if (!geo) {
     console.error('GeoJS failed to load - geo object is not available');
-} else {
-    console.log('GeoJS loaded successfully');
-    
-    // Log available layer types for debugging
-    if (geo.layerTypes) {
-        console.log('Available GeoJS layer types:', Object.keys(geo.layerTypes()));
-    }
+}
+if (geo && (!map || !util)) {
+    console.warn('GeoJS loaded, but map/util exports were not found.', {
+        hasMap: Boolean(map),
+        hasUtil: Boolean(util),
+    });
 }
 
 // Global export for compatibility
@@ -83,8 +118,7 @@ if (typeof window !== 'undefined') {
         event,
         feature,
         featureLayer,
-        createFileReader
+        createFileReader,
     };
+    window.geo = geo;
 }
-
-window.geo = geo;
