@@ -64,17 +64,61 @@ class SelectTool extends AnnotationUITool{
         this.ps = this.project.paperScope;
         this.usesGeoJSDisplaySelection = true;
         this._lastSelectionItems = [];
+        this._replaceSelectionOnSync = false;
         this.setToolbarControl(new SelectToolbar(this));
         this.registerOverlayCursorOwnedClasses('selectable-layer');
 
-        let selectionRectangle = new paper.Path.Rectangle({strokeWidth:1,rescale:{strokeWidth:1},strokeColor:'black'});
-        let sr2 = new paper.Path.Rectangle({strokeWidth:1,dashArray:[10,10],rescale:{strokeWidth:1,dashArray:[10,10]},strokeColor:'white'});
+        let selectionRectangle = new paper.Path.Rectangle({
+            strokeWidth: 3,
+            rescale: {strokeWidth: 3},
+            strokeColor: '#111827',
+            opacity: 0.95,
+        });
+        let sr2 = new paper.Path.Rectangle({
+            strokeWidth: 1.5,
+            dashArray: [6, 4],
+            rescale: {strokeWidth: 1.5, dashArray: [6, 4]},
+            strokeColor: '#f8fafc',
+            opacity: 1,
+        });
         this.project.toolLayer.addChild(selectionRectangle);
         this.project.toolLayer.addChild(sr2);
         selectionRectangle.applyRescale();
         sr2.applyRescale();
         selectionRectangle.visible=false;
         sr2.visible=false;
+
+        const selectionMarquee = document.createElement('div');
+        selectionMarquee.className = 'annotation-selection-marquee';
+        Object.assign(selectionMarquee.style, {
+            position: 'absolute',
+            display: 'none',
+            pointerEvents: 'none',
+            boxSizing: 'border-box',
+            border: '3px solid #111827',
+            outline: '2px dashed #f8fafc',
+            outlineOffset: '-5px',
+            boxShadow: '0 0 0 1px rgba(15, 23, 42, 0.35)',
+            zIndex: '20',
+        });
+        this.project.overlay?._canvasdiv?.appendChild(selectionMarquee);
+
+        const hideSelectionMarquee = () => {
+            selectionMarquee.style.display = 'none';
+        };
+        const updateSelectionMarquee = (pointA, pointB) => {
+            const viewA = self.ps.view.projectToView(pointA);
+            const viewB = self.ps.view.projectToView(pointB);
+            const left = Math.min(viewA.x, viewB.x);
+            const top = Math.min(viewA.y, viewB.y);
+            const width = Math.abs(viewA.x - viewB.x);
+            const height = Math.abs(viewA.y - viewB.y);
+            selectionMarquee.style.display = 'block';
+            selectionMarquee.style.left = `${left}px`;
+            selectionMarquee.style.top = `${top}px`;
+            selectionMarquee.style.width = `${Math.max(width, 1)}px`;
+            selectionMarquee.style.height = `${Math.max(height, 1)}px`;
+        };
         
         this.extensions.onActivate=function(){ 
             self.geojsDisplay?.finishPaperEdit();
@@ -82,6 +126,11 @@ class SelectTool extends AnnotationUITool{
             self.clearOverlayCursorOwnedClasses();
         }    
         this.extensions.onDeactivate=function(shouldFinish){
+            selectionRectangle.visible = false;
+            sr2.visible = false;
+            selectionRectangle.selected = false;
+            sr2.selected = false;
+            hideSelectionMarquee();
             self.clearOverlayCursorOwnedClasses();
             self.tool.onMouseMove = null;
         }
@@ -105,6 +154,9 @@ class SelectTool extends AnnotationUITool{
         this.tool.onMouseUp=function(ev){
             selectionRectangle.visible=false;
             sr2.visible=false;
+            selectionRectangle.selected=false;
+            sr2.selected=false;
+            hideSelectionMarquee();
             if (!annotationToolPrimaryButtonDownOrUp(ev)) return;
             const keepExistingSelection = (ev.modifiers.control || ev.modifiers.meta);
             if(ev.downPoint.subtract(ev.point).length==0){
@@ -130,8 +182,14 @@ class SelectTool extends AnnotationUITool{
          */
         this.tool.onMouseDrag = function(ev){
             if (!annotationToolPrimaryButtonActiveDrag(ev)) return;
-            selectionRectangle.visible=true;
-            sr2.visible=true;
+            self.project.toolLayer.bringToFront();
+            selectionRectangle.bringToFront();
+            sr2.bringToFront();
+            selectionRectangle.visible=false;
+            sr2.visible=false;
+            selectionRectangle.selected=false;
+            sr2.selected=false;
+            updateSelectionMarquee(ev.downPoint, ev.point);
             let r=new paper.Rectangle(ev.downPoint,ev.point);
             selectionRectangle.set({segments:[r.topLeft, r.topRight, r.bottomRight, r.bottomLeft]});
             sr2.set({segments:[r.topLeft, r.topRight, r.bottomRight, r.bottomLeft]});
@@ -325,6 +383,7 @@ class SelectTool extends AnnotationUITool{
         const selectedItems = this.project.paperScope.findSelectedItems()
             .filter((item) => this._isItemSelectable(item));
         this._lastSelectionItems = selectedItems;
+        this._replaceSelectionOnSync = false;
         selectedItems.forEach((item) => item.deselect(true));
         this.geojsDisplay?.scheduleUpdate();
 
@@ -342,6 +401,7 @@ class SelectTool extends AnnotationUITool{
         const selectableItems = items.filter(item=>item && this._isItemSelectable(item));
         this._lastSelectionItems = selectableItems;
         const action = this.selection_action || 'select';
+        this._replaceSelectionOnSync = action === 'select' && !keepExistingSelection;
 
         if (action === 'deselect') {
             selectableItems.forEach(item=>item.deselect(true));

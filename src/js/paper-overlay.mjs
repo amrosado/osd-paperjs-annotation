@@ -271,6 +271,7 @@ class PaperOverlay extends OpenSeadragon.EventSource{
    * will not attempt to remove the overlay from the viewer, as it will be automatically removed during the viewer's cleanup process.
    */   
     destroy(viewerDestroyed){
+        if (this.destroyed) return;
         this.destroyed = true;
         this._canvasdiv.remove();
         this.paperScope.project && this.paperScope.project.remove();
