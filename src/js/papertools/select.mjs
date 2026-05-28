@@ -401,7 +401,7 @@ class SelectTool extends AnnotationUITool{
         const selectableItems = items.filter(item=>item && this._isItemSelectable(item));
         this._lastSelectionItems = selectableItems;
         const action = this.selection_action || 'select';
-        this._replaceSelectionOnSync = action === 'select' && !keepExistingSelection;
+        this._replaceSelectionOnSync = false;
 
         if (action === 'deselect') {
             selectableItems.forEach(item=>item.deselect(true));
@@ -411,9 +411,6 @@ class SelectTool extends AnnotationUITool{
         }
 
         if (action === 'select') {
-            if(!keepExistingSelection && selectableItems.length > 0){
-                this.project.paperScope.findSelectedItems().forEach(item=>item.deselect(true));
-            }
             selectableItems.forEach(item=>item.select(true));
             this.geojsDisplay?.scheduleUpdate();
             return;
