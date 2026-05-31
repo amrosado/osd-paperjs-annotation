@@ -1,7 +1,8 @@
 import { OpenSeadragon } from './osd-loader.mjs';
-import { debugDuration, debugLog, debugNow } from '../../../helpers/debugLog.js';
+import { debugDuration, debugLog, debugLogJson, debugNow } from '../../../helpers/debugLog.js';
 import { normalizeEmbeddingId } from '../../../helpers/embeddingIds.js';
 import { geo, map as GeoMap, util as geoUtil } from './geojs-loader.mjs';
+import { displayBoundsFromBounds } from './geojs-selection-helpers.mjs';
 
 const GEOJS_DISPLAY_Z_INDEX = '20';
 const PAPER_OVERLAY_Z_INDEX = '30';
@@ -659,14 +660,19 @@ class GeoJSDisplay {
         if (this._mapContentWidth !== contentSize.width || this._mapContentHeight !== contentSize.height) {
             this._mapContentWidth = contentSize.width;
             this._mapContentHeight = contentSize.height;
-            this._map.maxBounds?.({
-                left: 0,
-                top: 0,
-                right: contentSize.width,
-                bottom: contentSize.height,
-            });
+            if (!this._usesSharedGeoJSMap) {
+                this._map.maxBounds?.({
+                    left: 0,
+                    top: 0,
+                    right: contentSize.width,
+                    bottom: contentSize.height,
+                });
+            }
             this._markRenderDataDirty();
-            debugLog('geojs.display', 'map-content-size-updated', contentSize);
+            debugLog('geojs.display', 'map-content-size-updated', {
+                ...contentSize,
+                sharedGeoMap: Boolean(this._usesSharedGeoJSMap),
+            });
         }
 
         this._syncMapViewport(width, height);
@@ -931,7 +937,7 @@ class GeoJSDisplay {
     }
 
     _createGeoJSFeatures() {
-        this._pointFeature = this._layer.createFeature('point', { selectionAPI: false, gcs: null })
+        this._pointFeature = this._layer.createFeature('point', { selectionAPI: false })
             .position((d) => d.position)
             .style({
                 radius: featureStyleValue('radius', this.options.pointRadius),
@@ -941,7 +947,7 @@ class GeoJSDisplay {
                 strokeOpacity: featureStyleValue('strokeOpacity', this.options.strokeOpacity),
                 strokeWidth: featureStyleValue('strokeWidth', this.options.lineWidth),
             });
-        this._lineFeature = this._layer.createFeature('line', { selectionAPI: false, gcs: null })
+        this._lineFeature = this._layer.createFeature('line', { selectionAPI: false })
             .line((d) => d.line)
             .style({
                 strokeColor: featureStyleValue('strokeColor', colorToGeoJS('#1f2937', '#1f2937')),
@@ -949,7 +955,7 @@ class GeoJSDisplay {
                 strokeWidth: featureStyleValue('strokeWidth', this.options.lineWidth),
                 uniformLine: true,
             });
-        this._polygonFeature = this._layer.createFeature('polygon', { selectionAPI: false, gcs: null })
+        this._polygonFeature = this._layer.createFeature('polygon', { selectionAPI: false })
             .polygon((d) => ({ outer: d.outer, inner: d.inner }))
             .style({
                 fill: true,
@@ -1017,6 +1023,7 @@ class GeoJSDisplay {
     }
 
     hitTestRowsAtDisplayPoint(display, tolerance = this.options.hitTolerance) {
+        this._beginHitTestDisplayFrame('point');
         const pointTolerance = finiteNumber(tolerance, 6);
         const rows = this._featureRows.filter((row) => this._isFeatureIdVisible(row.id));
         return this._rowsAtDisplayPoint(rows, display, pointTolerance);
@@ -1090,6 +1097,7 @@ class GeoJSDisplay {
     }
 
     findRowsInDisplayRectangle(pointA, pointB, onlyFullyContained = false) {
+        this._beginHitTestDisplayFrame('rectangle');
         const rect = this._displayRectangleFromPoints(pointA, pointB);
         return this._featureRows
             .filter((row) => this._isFeatureIdVisible(row.id))
@@ -1100,6 +1108,7 @@ class GeoJSDisplay {
     }
 
     findRowsInDisplayRectangleByCenter(pointA, pointB) {
+        this._beginHitTestDisplayFrame('rectangle-center');
         const rect = this._displayRectangleFromPoints(pointA, pointB);
         return this._featureRows
             .filter((row) => this._isFeatureIdVisible(row.id))
@@ -1114,7 +1123,88 @@ class GeoJSDisplay {
             });
     }
 
+    findDirectEmbeddingRowsInDisplayRectangle(pointA, pointB, onlyFullyContained = false) {
+        this._beginHitTestDisplayFrame('direct-embedding-rectangle');
+        const mapRect = this._mapRectangleFromDisplayPoints(pointA, pointB);
+        if (!mapRect) {
+            const fallbackRows = this.findRowsInDisplayRectangle(pointA, pointB, onlyFullyContained)
+                .filter((row) => row?.directEmbedding && !row?.directEmbeddingOverview);
+            debugLogJson('geojs.selection', 'direct-map-rectangle-hit-test', {
+                mode: onlyFullyContained ? 'contained' : 'overlap',
+                fallback: 'display-rectangle',
+                rowCount: fallbackRows.length,
+                ...this._selectionRectangleLogDetails(pointA, pointB),
+                rowSamplesJson: JSON.stringify(this._selectionRowSamples(fallbackRows)),
+                fileCountsJson: JSON.stringify(this._selectionFileCounts(fallbackRows)),
+            });
+            return fallbackRows;
+        }
+        const query = this._rowsInMapRectangleResult(mapRect, onlyFullyContained);
+        const rows = query.rows.filter((row) => row?.directEmbedding && !row?.directEmbeddingOverview);
+        debugLogJson('geojs.selection', 'direct-map-rectangle-hit-test', {
+            mode: onlyFullyContained ? 'contained' : 'overlap',
+            rowCount: rows.length,
+            querySource: query.source,
+            querySourceRowCount: query.sourceRowCount,
+            queryVisibleRowCount: query.visibleRowCount,
+            queryMatchedRowCount: query.rows.length,
+            queryDirectMatchedRowCount: rows.length,
+            firstId: rows[0]?.id ?? null,
+            lastId: rows[rows.length - 1]?.id ?? null,
+            ...this._selectionRectangleLogDetails(pointA, pointB),
+            rowSamplesJson: JSON.stringify(this._selectionRowSamples(rows)),
+            fileCountsJson: JSON.stringify(this._selectionFileCounts(rows)),
+        });
+        return rows;
+    }
+
+    findDirectEmbeddingRowsInDisplayRectangleByCenter(pointA, pointB) {
+        this._beginHitTestDisplayFrame('direct-embedding-rectangle-center');
+        const mapRect = this._mapRectangleFromDisplayPoints(pointA, pointB);
+        if (!mapRect) {
+            const fallbackRows = this.findRowsInDisplayRectangleByCenter(pointA, pointB)
+                .filter((row) => row?.directEmbedding && !row?.directEmbeddingOverview);
+            debugLogJson('geojs.selection', 'direct-map-rectangle-hit-test', {
+                mode: 'center',
+                fallback: 'display-rectangle-center',
+                rowCount: fallbackRows.length,
+                ...this._selectionRectangleLogDetails(pointA, pointB),
+                rowSamplesJson: JSON.stringify(this._selectionRowSamples(fallbackRows)),
+                fileCountsJson: JSON.stringify(this._selectionFileCounts(fallbackRows)),
+            });
+            return fallbackRows;
+        }
+        const query = this._rowsInMapRectangleResult(mapRect, false);
+        const rows = query.rows
+            .filter((row) => row?.directEmbedding && !row?.directEmbeddingOverview)
+            .filter((row) => {
+                const bounds = this._rowCullingBounds(row);
+                if (!bounds) return false;
+                const center = {
+                    x: (bounds.minX + bounds.maxX) / 2,
+                    y: (bounds.minY + bounds.maxY) / 2,
+                };
+                return this._displayBoundsContainPoint(mapRect, center, 0);
+            });
+        debugLogJson('geojs.selection', 'direct-map-rectangle-hit-test', {
+            mode: 'center',
+            rowCount: rows.length,
+            querySource: query.source,
+            querySourceRowCount: query.sourceRowCount,
+            queryVisibleRowCount: query.visibleRowCount,
+            queryMatchedRowCount: query.rows.length,
+            queryDirectMatchedRowCount: rows.length,
+            firstId: rows[0]?.id ?? null,
+            lastId: rows[rows.length - 1]?.id ?? null,
+            ...this._selectionRectangleLogDetails(pointA, pointB),
+            rowSamplesJson: JSON.stringify(this._selectionRowSamples(rows)),
+            fileCountsJson: JSON.stringify(this._selectionFileCounts(rows)),
+        });
+        return rows;
+    }
+
     findPaperItemsInDisplayRectangle(pointA, pointB, onlyFullyContained = false) {
+        this._beginHitTestDisplayFrame('paper-rectangle');
         const rect = {
             minX: Math.min(pointA.x, pointB.x),
             minY: Math.min(pointA.y, pointB.y),
@@ -1157,6 +1247,166 @@ class GeoJSDisplay {
         };
     }
 
+    _debugPoint(point) {
+        if (!point || !Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y))) return null;
+        return {
+            x: Number(Number(point.x).toFixed(2)),
+            y: Number(Number(point.y).toFixed(2)),
+        };
+    }
+
+    _debugBounds(prefix, bounds) {
+        const flat = summarizeBounds(bounds);
+        return {
+            [prefix + 'MinX']: flat?.minX ?? null,
+            [prefix + 'MinY']: flat?.minY ?? null,
+            [prefix + 'MaxX']: flat?.maxX ?? null,
+            [prefix + 'MaxY']: flat?.maxY ?? null,
+            [prefix + 'Width']: flat?.width ?? null,
+            [prefix + 'Height']: flat?.height ?? null,
+        };
+    }
+
+    _boundsFromPoints(points) {
+        const validPoints = (points || []).filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+        if (!validPoints.length) return null;
+        return validPoints.reduce((bounds, point) => ({
+            minX: Math.min(bounds.minX, point.x),
+            minY: Math.min(bounds.minY, point.y),
+            maxX: Math.max(bounds.maxX, point.x),
+            maxY: Math.max(bounds.maxY, point.y),
+        }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+    }
+
+    _selectionRectangleCoordinateDiagnostics(pointA, pointB) {
+        if (!pointA || !pointB || !this._map?.displayToGcs) return null;
+        const displayRect = this._displayRectangleFromPoints(pointA, pointB);
+        const displayCorners = [
+            { x: displayRect.minX, y: displayRect.minY },
+            { x: displayRect.maxX, y: displayRect.minY },
+            { x: displayRect.maxX, y: displayRect.maxY },
+            { x: displayRect.minX, y: displayRect.maxY },
+        ];
+        const mapCorners = displayCorners
+            .map((point) => this._map.displayToGcs(point))
+            .filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+        const interfaceCorners = displayCorners
+            .map((point) => this._map.displayToGcs(point))
+            .filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+        const roundTripCorners = mapCorners
+            .map((point) => this._map.gcsToDisplay?.(point))
+            .filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+        const mapRect = this._boundsFromPoints(mapCorners);
+        const interfaceMapRect = this._boundsFromPoints(interfaceCorners);
+        return {
+            displayRect,
+            mapRect,
+            interfaceMapRect,
+            displayCorners,
+            mapCorners,
+            interfaceCorners,
+            roundTripCorners,
+            mapYDirection: mapCorners.length >= 4 ? Number((mapCorners[2].y - mapCorners[0].y).toFixed(2)) : null,
+            interfaceYDirection: interfaceCorners.length >= 4 ? Number((interfaceCorners[2].y - interfaceCorners[0].y).toFixed(2)) : null,
+        };
+    }
+
+    _selectionRectangleLogDetails(pointA, pointB) {
+        const diagnostics = this._selectionRectangleCoordinateDiagnostics(pointA, pointB);
+        if (!diagnostics) return { coordinateDiagnosticsAvailable: false };
+        return {
+            coordinateDiagnosticsAvailable: true,
+            ...this._debugBounds('display', diagnostics.displayRect),
+            ...this._debugBounds('map', diagnostics.mapRect),
+            ...this._debugBounds('interfaceMap', diagnostics.interfaceMapRect),
+            ...this._debugBounds('viewportMap', summarizeBounds(this._map?.bounds?.())),
+            contentWidth: this._mapContentWidth,
+            contentHeight: this._mapContentHeight,
+            mapYDirection: diagnostics.mapYDirection,
+            interfaceYDirection: diagnostics.interfaceYDirection,
+            displayCornersJson: JSON.stringify(diagnostics.displayCorners.map((point) => this._debugPoint(point))),
+            mapCornersJson: JSON.stringify(diagnostics.mapCorners.map((point) => this._debugPoint(point))),
+            interfaceMapCornersJson: JSON.stringify(diagnostics.interfaceCorners.map((point) => this._debugPoint(point))),
+            roundTripDisplayCornersJson: JSON.stringify(diagnostics.roundTripCorners.map((point) => this._debugPoint(point))),
+        };
+    }
+
+    _selectionFileCounts(rows, limit = 10) {
+        const counts = new Map();
+        (rows || []).forEach((row) => {
+            const props = row?.feature?.properties || {};
+            const fileId = props.wsifileId ?? props.wsifile_id ?? 'unknown';
+            const key = String(fileId);
+            counts.set(key, (counts.get(key) || 0) + 1);
+        });
+        return Array.from(counts.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, limit)
+            .map(([fileId, count]) => ({ fileId, count }));
+    }
+
+    _selectionRowSamples(rows, limit = 8) {
+        return (rows || []).slice(0, limit).map((row) => {
+            const bounds = this._rowCullingBounds(row);
+            const displayBounds = this._rowDisplayBounds(row);
+            const props = row?.feature?.properties || {};
+            return {
+                id: row?.id ?? null,
+                fileId: props.wsifileId ?? props.wsifile_id ?? null,
+                mapBounds: summarizeBounds(bounds),
+                displayBounds: summarizeBounds(displayBounds),
+            };
+        });
+    }
+
+    _mapRectangleFromDisplayPoints(pointA, pointB) {
+        if (!pointA || !pointB || !this._map?.displayToGcs) return null;
+        const displayRect = this._displayRectangleFromPoints(pointA, pointB);
+        const points = [
+            { x: displayRect.minX, y: displayRect.minY },
+            { x: displayRect.maxX, y: displayRect.minY },
+            { x: displayRect.maxX, y: displayRect.maxY },
+            { x: displayRect.minX, y: displayRect.maxY },
+        ]
+            .map((point) => this._map.displayToGcs(point))
+            .filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
+        if (!points.length) return null;
+        return points.reduce((bounds, point) => ({
+            minX: Math.min(bounds.minX, point.x),
+            minY: Math.min(bounds.minY, point.y),
+            maxX: Math.max(bounds.maxX, point.x),
+            maxY: Math.max(bounds.maxY, point.y),
+        }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+    }
+
+    _rowsInMapRectangleResult(rect, onlyFullyContained = false) {
+        const sourceRows = this._spatialIndex ? this._querySpatialIndex(rect) : this._featureRows;
+        let visibleRowCount = 0;
+        const rows = sourceRows.filter((row) => {
+            if (!this._isFeatureIdVisible(row.id)) return false;
+            visibleRowCount += 1;
+            const bounds = this._rowCullingBounds(row);
+            if (!bounds) return false;
+            if (onlyFullyContained) {
+                return bounds.minX >= rect.minX
+                    && bounds.maxX <= rect.maxX
+                    && bounds.minY >= rect.minY
+                    && bounds.maxY <= rect.maxY;
+            }
+            return this._boundsIntersect(bounds, rect);
+        });
+        return {
+            rows,
+            source: this._spatialIndex ? 'spatial-index' : 'feature-rows',
+            sourceRowCount: sourceRows.length,
+            visibleRowCount,
+        };
+    }
+
+    _rowsInMapRectangle(rect, onlyFullyContained = false) {
+        return this._rowsInMapRectangleResult(rect, onlyFullyContained).rows;
+    }
+
     _displayBoundsContainPoint(bounds, point, tolerance = 0) {
         return point.x >= bounds.minX - tolerance
             && point.x <= bounds.maxX + tolerance
@@ -1165,7 +1415,6 @@ class GeoJSDisplay {
     }
 
     _beginDisplayFrame() {
-        if (!this._usesDisplayCoordinates()) return;
         this._displayTransformVersion = (this._displayTransformVersion || 0) + 1;
         this._frameGeometryCache = {
             paperRect: null,
@@ -1173,6 +1422,22 @@ class GeoJSDisplay {
             layerByTiledImage: new Map(),
         };
         this._refreshTiledImageCache();
+    }
+
+    _beginHitTestDisplayFrame(reason = 'hit-test') {
+        this._syncMapViewport(this._width, this._height);
+        this._beginDisplayFrame();
+        if (reason !== 'point') {
+            debugLog('geojs.selection', 'hit-test-display-frame', {
+                reason,
+                coordinateMode: this.options.coordinateMode,
+                sharedGeoMap: Boolean(this._usesSharedGeoJSMap),
+                displayTransformVersion: this._displayTransformVersion || 0,
+                viewportSignature: this._viewportSignature(this._width, this._height),
+                width: this._width,
+                height: this._height,
+            });
+        }
     }
 
     _frameRects() {
@@ -1275,6 +1540,12 @@ class GeoJSDisplay {
             return;
         }
 
+        if (this._usesSharedGeoJSMap) {
+            const bounds = this._currentSharedMapBounds(0);
+            if (bounds) this._lastMapBounds = bounds;
+            return;
+        }
+
         const bounds = this._currentImageViewportBounds(0);
         const validBounds = bounds
             && Number.isFinite(bounds.minX)
@@ -1322,6 +1593,9 @@ class GeoJSDisplay {
     }
 
     _applyMapBounds(bounds) {
+        if (this._usesSharedGeoJSMap && !this._usesDisplayCoordinates()) {
+            return;
+        }
         const signature = this._mapBoundsSignature({
             minX: bounds?.left,
             minY: bounds?.top,
@@ -1745,7 +2019,22 @@ class GeoJSDisplay {
         return this._layoutScaleBase();
     }
 
+    _currentSharedMapBounds(margin = 0) {
+        const flat = summarizeBounds(this._map?.bounds?.());
+        if (!flat || flat.width <= 0 || flat.height <= 0) return null;
+        const mapMargin = Math.max(0, finiteNumber(margin, 0));
+        return {
+            minX: flat.minX - mapMargin,
+            minY: flat.minY - mapMargin,
+            maxX: flat.maxX + mapMargin,
+            maxY: flat.maxY + mapMargin,
+        };
+    }
+
     _currentImageViewportBounds(margin = 0) {
+        if (this._usesSharedGeoJSMap && !this._usesDisplayCoordinates()) {
+            return this._currentSharedMapBounds(margin);
+        }
         const viewport = this.viewer?.viewport;
         const bounds = viewport?.getBounds?.(true);
         if (!bounds || !Number.isFinite(bounds.x) || !Number.isFinite(bounds.y) || !Number.isFinite(bounds.width) || !Number.isFinite(bounds.height)) {
@@ -1945,21 +2234,10 @@ class GeoJSDisplay {
         if (row?.directEmbedding) {
             const bounds = this._embeddingRowBounds(row);
             if (!bounds) return null;
-            const displayPoints = [
-                { x: bounds.minX, y: bounds.minY },
-                { x: bounds.maxX, y: bounds.minY },
-                { x: bounds.maxX, y: bounds.maxY },
-                { x: bounds.minX, y: bounds.maxY },
-            ]
-                .map((point) => this._featureCoordinateToDisplay(row, point))
-                .filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y));
-            if (!displayPoints.length) return null;
-            return displayPoints.reduce((extent, point) => ({
-                minX: Math.min(extent.minX, point.x),
-                minY: Math.min(extent.minY, point.y),
-                maxX: Math.max(extent.maxX, point.x),
-                maxY: Math.max(extent.maxY, point.y),
-            }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+            return displayBoundsFromBounds(
+                bounds,
+                (point) => this._featureCoordinateToDisplay(row, point),
+            );
         }
 
         const geom = row.feature.geometry || {};
@@ -2183,7 +2461,9 @@ class GeoJSDisplay {
         const coordinateSpace = row?.feature?.properties?.coordinateSpace;
         let displayPoint;
         if (row?.directEmbedding || row?.directEmbeddingOverview) {
-            displayPoint = this._layoutPointToDisplay(row, point);
+            displayPoint = !this._usesDisplayCoordinates() && this._map?.gcsToDisplay
+                ? this._map.gcsToDisplay(point)
+                : this._layoutPointToDisplay(row, point);
         } else if (coordinateSpace === 'tiledImage') {
             displayPoint = this._tiledImagePointToDisplay(row, point);
         } else if (coordinateSpace === 'paper') {
