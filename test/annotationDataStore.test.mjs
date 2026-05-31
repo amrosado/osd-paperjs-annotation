@@ -82,5 +82,69 @@ assert.deepStrictEqual(
         annotationDataActionTypes.ADD_FEATURE_COLLECTIONS,
     ],
 );
+assert.deepStrictEqual(
+    reduxState.osdPaperjsAnnotation.lastMeta,
+    {},
+);
+
+let pairState = { osdPaperjsAnnotation: initialAnnotationDataState };
+let pairNotifications = 0;
+const dispatchGetStateStore = new AnnotationDataStore({
+    redux: {
+        enabled: true,
+        dispatch(action) {
+            pairState = {
+                ...pairState,
+                osdPaperjsAnnotation: annotationDataReducer(pairState.osdPaperjsAnnotation, action),
+            };
+        },
+        getState() {
+            return pairState;
+        },
+    },
+});
+dispatchGetStateStore.subscribe(() => {
+    pairNotifications += 1;
+});
+dispatchGetStateStore.replaceFeatureCollections([fcA], { source: 'direct-pair' });
+assert.strictEqual(pairNotifications, 1);
+assert.strictEqual(pairState.osdPaperjsAnnotation.lastMeta.source, 'direct-pair');
+
+let subscribedState = { osdPaperjsAnnotation: initialAnnotationDataState, unrelated: 0 };
+const subscribedListeners = new Set();
+const subscribedStore = {
+    dispatch(action) {
+        if (action.type.startsWith('osdPaperjsAnnotation/')) {
+            subscribedState = {
+                ...subscribedState,
+                osdPaperjsAnnotation: annotationDataReducer(subscribedState.osdPaperjsAnnotation, action),
+            };
+        } else {
+            subscribedState = { ...subscribedState, unrelated: subscribedState.unrelated + 1 };
+        }
+        subscribedListeners.forEach((listener) => listener());
+    },
+    getState() {
+        return subscribedState;
+    },
+    subscribe(listener) {
+        subscribedListeners.add(listener);
+        return () => subscribedListeners.delete(listener);
+    },
+};
+const subscribedDataStore = new AnnotationDataStore({
+    redux: {
+        enabled: true,
+        store: subscribedStore,
+    },
+});
+let subscribedNotifications = 0;
+subscribedDataStore.subscribe(() => {
+    subscribedNotifications += 1;
+});
+subscribedStore.dispatch({ type: 'unrelated/action' });
+assert.strictEqual(subscribedNotifications, 0);
+subscribedDataStore.replaceFeatureCollections([fcB]);
+assert.strictEqual(subscribedNotifications, 1);
 
 console.log('annotationDataStore tests passed');

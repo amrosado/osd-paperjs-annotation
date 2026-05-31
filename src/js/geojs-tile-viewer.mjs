@@ -77,6 +77,60 @@ function tileLayerParamsForFile(file) {
     return { params, width, height, tileWidth, tileHeight, maxLevel };
 }
 
+function levelScale(maxLevel, level) {
+    return Math.pow(2, Math.max(0, Number(maxLevel) - Number(level || 0)));
+}
+
+function normalizeLayerBounds(file, fallback = {}) {
+    const info = file?.file_tile_info || {};
+    const width = finitePositive(fallback.width ?? info.sizeX);
+    const height = finitePositive(fallback.height ?? info.sizeY);
+    return {
+        x: Number.isFinite(Number(fallback.x)) ? Number(fallback.x) : 0,
+        y: Number.isFinite(Number(fallback.y)) ? Number(fallback.y) : 0,
+        width,
+        height,
+    };
+}
+
+function unionBounds(bounds) {
+    if (!bounds.length) {
+        return { left: 0, top: 0, right: 1, bottom: 1 };
+    }
+    return bounds.reduce((union, bound) => ({
+        left: Math.min(union.left, bound.x),
+        top: Math.min(union.top, bound.y),
+        right: Math.max(union.right, bound.x + bound.width),
+        bottom: Math.max(union.bottom, bound.y + bound.height),
+    }), {
+        left: bounds[0].x,
+        top: bounds[0].y,
+        right: bounds[0].x + bounds[0].width,
+        bottom: bounds[0].y + bounds[0].height,
+    });
+}
+
+function copyGeoBounds(bounds, fallback = null) {
+    const source = bounds || fallback;
+    if (!source) return null;
+    const left = Number(source.left);
+    const top = Number(source.top);
+    const right = Number(source.right);
+    const bottom = Number(source.bottom);
+    if (![left, top, right, bottom].every(Number.isFinite)) {
+        return fallback ? copyGeoBounds(fallback) : null;
+    }
+    return { left, top, right, bottom };
+}
+
+function centerFromGeoBounds(bounds) {
+    return {
+        x: (bounds.left + bounds.right) / 2,
+        y: (bounds.top + bounds.bottom) / 2,
+    };
+}
+
+
 class GeoJSPaperWorld extends OpenSeadragon.EventSource {
     constructor(viewer) {
         super();
@@ -116,6 +170,20 @@ class GeoJSPaperWorld extends OpenSeadragon.EventSource {
 
     getIndexOfItem(item) {
         return this._items.indexOf(item);
+    }
+
+    getHomeBounds() {
+        if (!this._items.length) {
+            return new OpenSeadragon.Rect(0, 0, 1, 1);
+        }
+        const imageWidth = finitePositive(this.viewer.viewport?.imageWidth);
+        const union = unionBounds(this._items.map((item) => item.layoutBounds));
+        return new OpenSeadragon.Rect(
+            union.left / imageWidth,
+            union.top / imageWidth,
+            (union.right - union.left) / imageWidth,
+            (union.bottom - union.top) / imageWidth,
+        );
     }
 }
 
@@ -182,12 +250,12 @@ class GeoJSPaperViewport extends OpenSeadragon.EventSource {
         );
     }
 
-    getCenter() {
-        return this._viewportPointFromImage(this.viewer.geoMap.center());
+    getCenter(current = false) {
+        return this._viewportPointFromImage(centerFromGeoBounds(this.viewer._geoBoundsForViewport(current)));
     }
 
-    getBounds() {
-        const bounds = this.viewer.geoMap.bounds();
+    getBounds(current = false) {
+        const bounds = this.viewer._geoBoundsForViewport(current);
         return new OpenSeadragon.Rect(
             bounds.left / this.imageWidth,
             bounds.top / this.imageWidth,
@@ -196,8 +264,8 @@ class GeoJSPaperViewport extends OpenSeadragon.EventSource {
         );
     }
 
-    getZoom() {
-        const bounds = this.viewer.geoMap.bounds();
+    getZoom(current = false) {
+        const bounds = this.viewer._geoBoundsForViewport(current);
         const visibleWidth = finitePositive(bounds.right - bounds.left, this.imageWidth);
         return this.imageWidth / visibleWidth;
     }
@@ -249,7 +317,7 @@ class GeoJSPaperViewport extends OpenSeadragon.EventSource {
 
     panTo(point) {
         this.viewer.geoMap.center(this._imagePointFromViewport(point));
-        this.viewer._notifyViewportChanged();
+        this.viewer._notifyViewportChanged({ finish: true });
         return this;
     }
 
@@ -265,7 +333,7 @@ class GeoJSPaperViewport extends OpenSeadragon.EventSource {
             right: currentCenter.x + visibleWidth / 2,
             bottom: currentCenter.y + visibleHeight / 2,
         });
-        this.viewer._notifyViewportChanged();
+        this.viewer._notifyViewportChanged({ finish: true });
         return this;
     }
 
@@ -276,7 +344,7 @@ class GeoJSPaperViewport extends OpenSeadragon.EventSource {
             right: (rect.x + rect.width) * this.imageWidth,
             bottom: (rect.y + rect.height) * this.imageWidth,
         });
-        this.viewer._notifyViewportChanged();
+        this.viewer._notifyViewportChanged({ finish: true });
         return this;
     }
 
@@ -287,7 +355,7 @@ class GeoJSPaperViewport extends OpenSeadragon.EventSource {
             right: this.imageWidth,
             bottom: this.imageHeight,
         });
-        this.viewer._notifyViewportChanged();
+        this.viewer._notifyViewportChanged({ finish: true });
         return this;
     }
 
@@ -301,12 +369,13 @@ class GeoJSPaperViewport extends OpenSeadragon.EventSource {
 }
 
 class GeoJSPaperTiledImage extends OpenSeadragon.EventSource {
-    constructor(viewer, file, layer, index) {
+    constructor(viewer, file, layer, index, layoutBounds = null) {
         super();
         this.viewer = viewer;
         this.file = file;
         this.layer = layer;
         this.index = index;
+        this.layoutBounds = normalizeLayerBounds(file, layoutBounds || {});
         this.source = {
             name: file?.name,
             width: finitePositive(file?.file_tile_info?.sizeX),
@@ -354,7 +423,13 @@ class GeoJSPaperTiledImage extends OpenSeadragon.EventSource {
     }
 
     getBoundsNoRotate() {
-        return new OpenSeadragon.Rect(0, 0, 1, this.source.height / this.source.width);
+        const imageWidth = finitePositive(this.viewer.viewport?.imageWidth);
+        return new OpenSeadragon.Rect(
+            this.layoutBounds.x / imageWidth,
+            this.layoutBounds.y / imageWidth,
+            this.layoutBounds.width / imageWidth,
+            this.layoutBounds.height / imageWidth,
+        );
     }
 
     getBounds() {
@@ -367,6 +442,47 @@ class GeoJSPaperTiledImage extends OpenSeadragon.EventSource {
 
     getContentSize() {
         return new OpenSeadragon.Point(this.source.width, this.source.height);
+    }
+
+    imageToViewportCoordinates(x, y) {
+        const point = typeof x === 'object' ? x : { x, y };
+        const imageWidth = finitePositive(this.viewer.viewport?.imageWidth);
+        return new OpenSeadragon.Point(
+            (this.layoutBounds.x + Number(point?.x || 0)) / imageWidth,
+            (this.layoutBounds.y + Number(point?.y || 0)) / imageWidth,
+        );
+    }
+
+    viewportToImageCoordinates(point) {
+        const imageWidth = finitePositive(this.viewer.viewport?.imageWidth);
+        return new OpenSeadragon.Point(
+            Number(point?.x || 0) * imageWidth - this.layoutBounds.x,
+            Number(point?.y || 0) * imageWidth - this.layoutBounds.y,
+        );
+    }
+
+    imageToViewportRectangle(rect) {
+        const imageWidth = finitePositive(this.viewer.viewport?.imageWidth);
+        return new OpenSeadragon.Rect(
+            (this.layoutBounds.x + Number(rect?.x || 0)) / imageWidth,
+            (this.layoutBounds.y + Number(rect?.y || 0)) / imageWidth,
+            Number(rect?.width || 0) / imageWidth,
+            Number(rect?.height || 0) / imageWidth,
+        );
+    }
+
+    viewportToImageRectangle(rect) {
+        const topLeft = this.viewportToImageCoordinates({ x: rect.x, y: rect.y });
+        const bottomRight = this.viewportToImageCoordinates({
+            x: rect.x + rect.width,
+            y: rect.y + rect.height,
+        });
+        return new OpenSeadragon.Rect(
+            topLeft.x,
+            topLeft.y,
+            bottomRight.x - topLeft.x,
+            bottomRight.y - topLeft.y,
+        );
     }
 
     getRotation() {
@@ -402,8 +518,15 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         this.prefixUrl = prefixUrl;
         this.tileSources = [];
         this.PaperOverlays = [];
+        this._layerBounds = [];
+        this._layoutBounds = { left: 0, top: 0, right: firstParams.width, bottom: firstParams.height };
         this._mouseNavEnabled = true;
         this._destroyed = false;
+        this._initialSizeApplied = false;
+        this._currentGeoBounds = copyGeoBounds(this._layoutBounds);
+        this._viewportChangeFrame = null;
+        this._viewportChangeFrameActive = false;
+        this._pendingViewportFinish = false;
 
         this.element = document.getElementById(id);
         if (!this.element) {
@@ -442,7 +565,6 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
             clampZoom: true,
             discreteZoom: false,
         });
-        this.viewport.goHome();
         this._bindGeoMapEvents();
         this._bindNavigationFallback();
         this._resizeObserver = new ResizeObserver(() => this._resize());
@@ -495,7 +617,8 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
                 levels: (tileSource.maxLevel ?? 0) + 1,
             },
         };
-        const { params } = tileLayerParamsForFile(file);
+        const { params, maxLevel } = tileLayerParamsForFile(file);
+        const layoutBounds = this._resolveLayerBounds(file, options.geojsBounds);
         const url = (x, y, level) => tileSource.getTileUrl
             ? tileSource.getTileUrl(level, x, y)
             : '';
@@ -504,18 +627,108 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
             renderer: 'webgl',
             url,
             keepLower: true,
+            tileOffset: (level) => {
+                const scale = levelScale(maxLevel, level);
+                return {
+                    x: -layoutBounds.x / scale,
+                    y: -layoutBounds.y / scale,
+                };
+            },
             crossDomain: tileSource.crossOriginPolicy === false ? null : (tileSource.crossOriginPolicy || 'anonymous'),
             attribution: '',
             opacity: 1,
         });
-        const tiledImage = new GeoJSPaperTiledImage(this, file, layer, options.index ?? this.world.getItemCount());
+        const tiledImage = new GeoJSPaperTiledImage(this, file, layer, options.index ?? this.world.getItemCount(), layoutBounds);
         this.tileSources.push(tileSource);
+        this._layerBounds.push(layoutBounds);
+        this._applyLayoutBounds();
         this.world.addItem(tiledImage, { index: options.index });
         this.raiseEvent('open', { item: tiledImage, source: tileSource });
         options.success?.({ item: tiledImage });
-        this.geoMap.draw();
+        this._scheduleDraw();
         return tiledImage;
     }
+
+
+    _resolveLayerBounds(file, explicitBounds = null) {
+        if (explicitBounds) {
+            return normalizeLayerBounds(file, explicitBounds);
+        }
+        const info = file?.file_tile_info || {};
+        const width = finitePositive(info.sizeX);
+        const height = finitePositive(info.sizeY);
+        const gap = Math.max(128, width * 0.08);
+        const x = this._layerBounds.length
+            ? Math.max(...this._layerBounds.map((bounds) => bounds.x + bounds.width)) + gap
+            : 0;
+        return normalizeLayerBounds(file, { x, y: 0, width, height });
+    }
+
+    _applyLayoutBounds() {
+        const union = unionBounds(this._layerBounds);
+        this._layoutBounds = union;
+        this.viewport.imageWidth = finitePositive(union.right - union.left);
+        this.viewport.imageHeight = finitePositive(union.bottom - union.top);
+        this.geoMap.maxBounds?.({
+            left: union.left,
+            top: union.top,
+            right: union.right,
+            bottom: union.bottom,
+        });
+    }
+
+    _scheduleDraw() {
+        if (this._drawFrame || this._destroyed) return;
+        const schedule = typeof window !== 'undefined' && window.requestAnimationFrame
+            ? window.requestAnimationFrame
+            : (callback) => setTimeout(callback, 0);
+        this._drawFrame = schedule(() => {
+            this._drawFrame = null;
+            if (!this._destroyed) {
+                this.geoMap.draw();
+            }
+        });
+    }
+
+    _captureCurrentViewportState() {
+        const bounds = copyGeoBounds(this.geoMap?.bounds?.(), this._currentGeoBounds || this._layoutBounds);
+        if (bounds) {
+            this._currentGeoBounds = bounds;
+        }
+        return copyGeoBounds(bounds, this._layoutBounds);
+    }
+
+    _geoBoundsForViewport(current = false) {
+        if (current && this._currentGeoBounds) {
+            return copyGeoBounds(this._currentGeoBounds);
+        }
+        return this._captureCurrentViewportState()
+            || copyGeoBounds(this._currentGeoBounds)
+            || copyGeoBounds(this._layoutBounds)
+            || { left: 0, top: 0, right: 1, bottom: 1 };
+    }
+
+    _scheduleViewportChanged({ finish = false } = {}) {
+        if (this._destroyed) return;
+        this._captureCurrentViewportState();
+        this._pendingViewportFinish = this._pendingViewportFinish || Boolean(finish);
+        if (!this._viewportChangeFrameActive) {
+            this._viewportChangeFrameActive = true;
+            this._notifyViewportChanged({ finish: false });
+        }
+        if (this._viewportChangeFrame) return;
+        const schedule = typeof window !== 'undefined' && window.requestAnimationFrame
+            ? window.requestAnimationFrame
+            : (callback) => setTimeout(callback, 0);
+        this._viewportChangeFrame = schedule(() => {
+            this._viewportChangeFrame = null;
+            this._viewportChangeFrameActive = false;
+            const shouldFinish = this._pendingViewportFinish;
+            this._pendingViewportFinish = false;
+            this._notifyViewportChanged({ finish: shouldFinish });
+        });
+    }
+
 
     currentPage() {
         return 0;
@@ -536,8 +749,17 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
     }
 
     _bindGeoMapEvents() {
-        [geoEvent?.pan, geoEvent?.zoom, geoEvent?.resize].filter(Boolean).forEach((name) => {
-            this.geoMap.geoOn(name, () => this._notifyViewportChanged());
+        [geoEvent?.pan, geoEvent?.zoom].filter(Boolean).forEach((name) => {
+            this.geoMap.geoOn(name, () => this._scheduleViewportChanged({ finish: false }));
+        });
+        [geoEvent?.resize].filter(Boolean).forEach((name) => {
+            this.geoMap.geoOn(name, () => this._scheduleViewportChanged({ finish: true }));
+        });
+        [geoEvent?.transitionstart].filter(Boolean).forEach((name) => {
+            this.geoMap.geoOn(name, () => this._scheduleViewportChanged({ finish: false }));
+        });
+        [geoEvent?.transitionend, geoEvent?.transitioncancel].filter(Boolean).forEach((name) => {
+            this.geoMap.geoOn(name, () => this._notifyViewportChanged({ finish: true }));
         });
     }
 
@@ -560,8 +782,8 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
 
         consumeNavigationEvent(event);
         this.geoMap.zoom(currentZoom + delta, { map: display, geo }, true, false);
-        this.geoMap.draw();
-        this._notifyViewportChanged();
+        this._scheduleDraw();
+        this._scheduleViewportChanged({ finish: true });
     }
 
     _handleNavigationPointerDown(event) {
@@ -586,8 +808,8 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
 
         consumeNavigationEvent(event);
         this.geoMap.pan({ x: dx, y: dy }, true, 'limited');
-        this.geoMap.draw();
-        this._notifyViewportChanged();
+        this._scheduleDraw();
+        this._scheduleViewportChanged({ finish: false });
     }
 
     _handleNavigationPointerUp(event) {
@@ -596,6 +818,7 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         this.canvas.releasePointerCapture?.(event.pointerId);
         this._navigationDrag = null;
         consumeNavigationEvent(event);
+        this._notifyViewportChanged({ finish: true });
     }
 
     _bindNavigationFallback() {
@@ -619,11 +842,15 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         this._navigationDrag = null;
     }
 
-    _notifyViewportChanged() {
+    _notifyViewportChanged({ finish = true } = {}) {
+        if (this._destroyed) return;
+        this._captureCurrentViewportState();
         this.viewport.refreshSize();
         this.raiseEvent('viewport-change', {});
         this.raiseEvent('animation', {});
-        this.raiseEvent('animation-finish', {});
+        if (finish) {
+            this.raiseEvent('animation-finish', {});
+        }
     }
 
     _resize() {
@@ -632,10 +859,14 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         const height = Math.max(1, this.container.clientHeight || this.element.clientHeight || 1);
         this.geoMap.size({ width, height });
         this.viewport.refreshSize();
+        if (!this._initialSizeApplied) {
+            this._initialSizeApplied = true;
+            this.viewport.goHome();
+        }
         this.raiseEvent('resize', { width, height });
         this.raiseEvent('reset-size', { width, height });
-        this._notifyViewportChanged();
-        this.geoMap.draw();
+        this._notifyViewportChanged({ finish: true });
+        this._scheduleDraw();
     }
 
     destroy() {

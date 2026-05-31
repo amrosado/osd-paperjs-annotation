@@ -39,6 +39,7 @@
 import {AnnotationUITool, AnnotationUIToolbarBase, annotationToolPrimaryButtonActiveDrag, annotationToolPrimaryButtonDownOrUp} from './annotationUITool.mjs';
 import { paper } from '../paperjs.mjs';
 import { makeFaIcon } from '../utils/faIcon.mjs';
+import { debugLog } from '../../../../helpers/debugLog.js';
 
 /**
  * Represents the SelectTool class that extends the AnnotationUITool.
@@ -64,7 +65,13 @@ class SelectTool extends AnnotationUITool{
         this.ps = this.project.paperScope;
         this.usesGeoJSDisplaySelection = true;
         this._lastSelectionItems = [];
+        this._lastSelectionEmbeddingIds = [];
+        this._lastGeojsDirectHitHadRows = false;
         this._replaceSelectionOnSync = false;
+        this._selectionPointerActive = false;
+        this._viewportChangedDuringSelectionPointer = false;
+        this._selectionViewportChangeHandler = null;
+        this._selectionDownDisplayPoint = null;
         this.setToolbarControl(new SelectToolbar(this));
         this.registerOverlayCursorOwnedClasses('selectable-layer');
 
@@ -123,6 +130,7 @@ class SelectTool extends AnnotationUITool{
         this.extensions.onActivate=function(){ 
             self.geojsDisplay?.finishPaperEdit();
             self.tool.onMouseMove = (ev)=>self.onMouseMove(ev);
+            self._bindViewportNavigationGuard();
             self.clearOverlayCursorOwnedClasses();
         }    
         this.extensions.onDeactivate=function(shouldFinish){
@@ -131,6 +139,10 @@ class SelectTool extends AnnotationUITool{
             selectionRectangle.selected = false;
             sr2.selected = false;
             hideSelectionMarquee();
+            self._selectionPointerActive = false;
+            self._viewportChangedDuringSelectionPointer = false;
+            self._selectionDownDisplayPoint = null;
+            self._unbindViewportNavigationGuard();
             self.clearOverlayCursorOwnedClasses();
             self.tool.onMouseMove = null;
         }
@@ -138,6 +150,14 @@ class SelectTool extends AnnotationUITool{
             if(ev.key=='escape'){
                 self.clearSelection();
             }
+        }
+
+        this.tool.onMouseDown=function(ev){
+            if (!annotationToolPrimaryButtonDownOrUp(ev)) return;
+            self._consumeSelectionPointerEvent(ev);
+            self._selectionPointerActive = true;
+            self._viewportChangedDuringSelectionPointer = false;
+            self._selectionDownDisplayPoint = self._eventDisplayPoint(ev);
         }
        
         /**
@@ -152,21 +172,95 @@ class SelectTool extends AnnotationUITool{
          * @property {Item[]} selectedItems - An array of selected items to be deselected.
          */        
         this.tool.onMouseUp=function(ev){
+            if (annotationToolPrimaryButtonDownOrUp(ev)) {
+                self._consumeSelectionPointerEvent(ev);
+            }
             selectionRectangle.visible=false;
             sr2.visible=false;
             selectionRectangle.selected=false;
             sr2.selected=false;
             hideSelectionMarquee();
-            if (!annotationToolPrimaryButtonDownOrUp(ev)) return;
+            const viewportNavigated = self._viewportChangedDuringSelectionPointer;
+            const selectionDownDisplayPoint = self._selectionDownDisplayPoint;
+            self._selectionPointerActive = false;
+            self._viewportChangedDuringSelectionPointer = false;
+            self._selectionDownDisplayPoint = null;
+            if (!annotationToolPrimaryButtonDownOrUp(ev)) {
+                const ignoredDisplayRect = self._pointRectSummary(selectionDownDisplayPoint, self._eventDisplayPoint(ev));
+                const ignoredProjectRect = self._pointRectSummary(ev?.downPoint, ev?.point);
+                debugLog('geojs.selection', 'pointer-up-ignored', {
+                    primaryButton: annotationToolPrimaryButtonDownOrUp(ev),
+                    viewportNavigated,
+                    displayRect: ignoredDisplayRect,
+                    projectRect: ignoredProjectRect,
+                    ...self._flatRectSummary('display', ignoredDisplayRect),
+                    ...self._flatRectSummary('project', ignoredProjectRect),
+                });
+                return;
+            }
             const keepExistingSelection = (ev.modifiers.control || ev.modifiers.meta);
+            const upDisplayPoint = self._eventDisplayPoint(ev);
+            const displayRect = self._pointRectSummary(selectionDownDisplayPoint, upDisplayPoint);
+            const projectRect = self._pointRectSummary(ev?.downPoint, ev?.point);
+            debugLog('geojs.selection', 'pointer-up', {
+                action: self.selection_action || 'select',
+                keepExistingSelection,
+                viewportNavigated,
+                dragDistance: Number.isFinite(ev?.downPoint?.subtract?.(ev.point)?.length)
+                    ? Number(ev.downPoint.subtract(ev.point).length.toFixed(2))
+                    : null,
+                displayRect,
+                projectRect,
+                ...self._flatRectSummary('display', displayRect),
+                ...self._flatRectSummary('project', projectRect),
+            });
             if(ev.downPoint.subtract(ev.point).length==0){
                 //not a click-and-drag, do element selection
+                const geojsRows = self._geojsDirectRowsAtEvent(ev);
+                if (!geojsRows.length && self.selection_action === 'deselect' && self._lastGeojsDirectHitHadRows) return;
+                if (geojsRows.length) {
+                    const row = geojsRows[0];
+                    debugLog('geojs.selection', 'direct-click-hit', {
+                        action: self.selection_action || 'select',
+                        rowCount: geojsRows.length,
+                        firstId: row?.id,
+                        keepExistingSelection,
+                    });
+                    const paperItem = self.geojsDisplay?.getPaperItemForRow?.(row);
+                    if (paperItem) {
+                        debugLog('geojs.selection', 'direct-click-materialized', {
+                            id: row?.id,
+                            selected: Boolean(paperItem.selected),
+                        });
+                        self._applySelectionAction([paperItem], keepExistingSelection, true);
+                    } else {
+                        debugLog('geojs.selection', 'direct-click-id-fallback', {
+                            rowCount: geojsRows.length,
+                            firstIds: geojsRows.slice(0, 5).map((hitRow) => hitRow.id),
+                        });
+                        self._applyEmbeddingSelectionAction(geojsRows.map((hitRow) => hitRow.id), keepExistingSelection, true);
+                    }
+                    return;
+                }
                 let hitResult = self.hitTestPoint(ev);
                 const hitItems = hitResult && self._isItemSelectable(hitResult.item) ? [hitResult.item] : [];
                 self._applySelectionAction(hitItems, keepExistingSelection, true);
                 
             } else{
                 //click and drag, do area-based selection
+                const geojsRows = self._geojsDirectRowsInArea(ev, false, selectionDownDisplayPoint);
+                if (!geojsRows.length && self.selection_action === 'deselect' && self._lastGeojsDirectHitHadRows) return;
+                if (geojsRows.length) {
+                    debugLog('geojs.selection', 'direct-drag-hit', {
+                        action: self.selection_action || 'select',
+                        rowCount: geojsRows.length,
+                        firstId: geojsRows[0]?.id,
+                        lastId: geojsRows[geojsRows.length - 1]?.id,
+                        keepExistingSelection,
+                    });
+                    self._applyEmbeddingSelectionAction(geojsRows.map((row) => row.id), keepExistingSelection, false);
+                    return;
+                }
                 let hitResults = self.hitTestArea(ev);
                 self._applySelectionAction(hitResults, keepExistingSelection, false);
                 //limit results to a single layer
@@ -182,6 +276,7 @@ class SelectTool extends AnnotationUITool{
          */
         this.tool.onMouseDrag = function(ev){
             if (!annotationToolPrimaryButtonActiveDrag(ev)) return;
+            self._consumeSelectionPointerEvent(ev);
             self.project.toolLayer.bringToFront();
             selectionRectangle.bringToFront();
             sr2.bringToFront();
@@ -210,7 +305,8 @@ class SelectTool extends AnnotationUITool{
    * @returns {boolean} Returns true if there are GeoJSON feature items, false otherwise.
    */
     doAnnotationItemsExist(){
-        return this.ps.project.getItems({match:i=>i.isGeoJSONFeature}).length>0; 
+        if (this.ps.project.getItems({match:i=>i.isGeoJSONFeature}).length > 0) return true;
+        return Boolean(this.geojsDisplay?.hasSelectableRows?.());
     }
 
   /**
@@ -278,7 +374,7 @@ class SelectTool extends AnnotationUITool{
             if (this.selection_action === 'deselect') {
                 return this._uniqueItems([
                     ...paperItems.filter((item) => item.selected),
-                    ...geojsItems.filter((item) => item.selected),
+                    ...geojsItems,
                 ]);
             }
             return this._uniqueItems([...geojsItems, ...paperItems]);
@@ -301,11 +397,187 @@ class SelectTool extends AnnotationUITool{
         return this.project?.paperScope?.annotationToolkit?.geojsDisplay || null;
     }
 
+    _bindViewportNavigationGuard(){
+        const viewer = this.project?.overlay?.viewer;
+        if (!viewer || this._selectionViewportChangeHandler) return;
+        this._selectionViewportChangeHandler = () => {
+            if (this._selectionPointerActive) {
+                this._viewportChangedDuringSelectionPointer = true;
+            }
+        };
+        viewer.addHandler('viewport-change', this._selectionViewportChangeHandler);
+    }
+
+    _unbindViewportNavigationGuard(){
+        const viewer = this.project?.overlay?.viewer;
+        if (!viewer || !this._selectionViewportChangeHandler) return;
+        viewer.removeHandler('viewport-change', this._selectionViewportChangeHandler);
+        this._selectionViewportChangeHandler = null;
+    }
+
+    _consumeSelectionPointerEvent(ev){
+        const nativeEvent = ev?.event || ev?.original?.nativeEvent || ev?.nativeEvent || null;
+        nativeEvent?.preventDefault?.();
+        nativeEvent?.stopPropagation?.();
+        nativeEvent?.stopImmediatePropagation?.();
+    }
+
     _geojsPaperItemAtEvent(ev){
         if (!this.geojsDisplay?.enabled) return null;
         return this.geojsDisplay.hitTestPaperItemsAtEvent(ev)[0]
+            || this.geojsDisplay.hitTestPaperItemsAtProjectPoint?.(ev.point)?.[0]
             || this._paperBoundsItemsAtPoint(ev.point)[0]
             || null;
+    }
+
+    _isDirectEmbeddingRow(row){
+        return Boolean(row?.directEmbedding && !row?.directEmbeddingOverview && row.id !== undefined && row.id !== null);
+    }
+
+    _eventDisplayPoint(ev){
+        const nativeEvent = ev?.event || ev?.original?.nativeEvent || ev?.nativeEvent || null;
+        const clientX = Number(nativeEvent?.clientX);
+        const clientY = Number(nativeEvent?.clientY);
+        const rect = this.geojsDisplay?.element?.getBoundingClientRect?.()
+            || this.geojsDisplay?.viewer?.canvas?.getBoundingClientRect?.()
+            || this.project?.overlay?._canvas?.getBoundingClientRect?.()
+            || null;
+        if (!rect || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+        return {
+            x: clientX - rect.left,
+            y: clientY - rect.top,
+        };
+    }
+
+    _filterDirectGeojsRows(hitRows){
+        const directRows = (hitRows || []).filter((row) => this._isDirectEmbeddingRow(row));
+        return this.selection_action === 'deselect' && this.geojsDisplay?.isEmbeddingSelectedId
+            ? directRows.filter((row) => this.geojsDisplay.isEmbeddingSelectedId(row.id))
+            : directRows;
+    }
+
+    _geojsDirectRowsAtEvent(ev){
+        if (!this.geojsDisplay?.enabled) return [];
+        const displayPoint = this._eventDisplayPoint(ev);
+        if (displayPoint && this.geojsDisplay.hitTestRowsAtDisplayPoint) {
+            const hitRows = (this.geojsDisplay.hitTestRowsAtDisplayPoint(displayPoint) || [])
+                .filter((row) => this._isDirectEmbeddingRow(row));
+            const rows = this._filterDirectGeojsRows(hitRows);
+            this._lastGeojsDirectHitHadRows = hitRows.length > 0;
+            debugLog('geojs.selection', 'direct-hit-test-point', {
+                action: this.selection_action || 'select',
+                source: 'display',
+                rowCount: rows.length,
+                hitRowCount: hitRows.length,
+                filteredToSelected: this.selection_action === 'deselect',
+                firstId: rows[0]?.id,
+                displayX: Number.isFinite(displayPoint.x) ? displayPoint.x : null,
+                displayY: Number.isFinite(displayPoint.y) ? displayPoint.y : null,
+                projectX: Number.isFinite(ev?.point?.x) ? ev.point.x : null,
+                projectY: Number.isFinite(ev?.point?.y) ? ev.point.y : null,
+            });
+            if (hitRows.length) return rows;
+        }
+        return this._geojsDirectRowsAtPoint(ev?.point);
+    }
+
+    _geojsDirectRowsAtPoint(point){
+        if (!this.geojsDisplay?.enabled || !point) return [];
+        const hitRows = (this.geojsDisplay.hitTestRowsAtProjectPoint?.(point) || [])
+            .filter((row) => this._isDirectEmbeddingRow(row));
+        const rows = this._filterDirectGeojsRows(hitRows);
+        this._lastGeojsDirectHitHadRows = hitRows.length > 0;
+        debugLog('geojs.selection', 'direct-hit-test-point', {
+            action: this.selection_action || 'select',
+            source: 'project',
+            rowCount: rows.length,
+            hitRowCount: hitRows.length,
+            filteredToSelected: this.selection_action === 'deselect',
+            firstId: rows[0]?.id,
+            x: Number.isFinite(point.x) ? point.x : null,
+            y: Number.isFinite(point.y) ? point.y : null,
+        });
+        return rows;
+    }
+
+    _pointRectSummary(pointA, pointB){
+        if (!pointA || !pointB) return null;
+        const minX = Math.min(Number(pointA.x), Number(pointB.x));
+        const minY = Math.min(Number(pointA.y), Number(pointB.y));
+        const maxX = Math.max(Number(pointA.x), Number(pointB.x));
+        const maxY = Math.max(Number(pointA.y), Number(pointB.y));
+        if (![minX, minY, maxX, maxY].every(Number.isFinite)) return null;
+        return {
+            minX: Number(minX.toFixed(2)),
+            minY: Number(minY.toFixed(2)),
+            maxX: Number(maxX.toFixed(2)),
+            maxY: Number(maxY.toFixed(2)),
+            width: Number((maxX - minX).toFixed(2)),
+            height: Number((maxY - minY).toFixed(2)),
+        };
+    }
+
+    _flatRectSummary(prefix, rect){
+        return {
+            [prefix + 'MinX']: rect?.minX ?? null,
+            [prefix + 'MinY']: rect?.minY ?? null,
+            [prefix + 'MaxX']: rect?.maxX ?? null,
+            [prefix + 'MaxY']: rect?.maxY ?? null,
+            [prefix + 'Width']: rect?.width ?? null,
+            [prefix + 'Height']: rect?.height ?? null,
+        };
+    }
+
+    _uniqueRows(rows){
+        const seen = new Set();
+        return (rows || []).filter((row) => {
+            const id = row?.id;
+            if (id === undefined || id === null || seen.has(id)) return false;
+            seen.add(id);
+            return true;
+        });
+    }
+
+    _geojsDirectRowsInArea(ev, onlyFullyContained = false, downDisplayPoint = null){
+        if (!this.geojsDisplay?.enabled) return [];
+        const deselectMode = this.selection_action === 'deselect';
+        const currentDisplayPoint = this._eventDisplayPoint(ev);
+        const displaySourceRows = downDisplayPoint && currentDisplayPoint && this.geojsDisplay.findRowsInDisplayRectangle
+            ? (deselectMode && this.geojsDisplay.findRowsInDisplayRectangleByCenter
+                ? this.geojsDisplay.findRowsInDisplayRectangleByCenter(currentDisplayPoint, downDisplayPoint)
+                : this.geojsDisplay.findRowsInDisplayRectangle(currentDisplayPoint, downDisplayPoint, onlyFullyContained))
+            : [];
+        const projectSourceRows = ev?.point && ev?.downPoint
+            ? (deselectMode && this.geojsDisplay.findRowsInProjectRectangleByCenter
+                ? this.geojsDisplay.findRowsInProjectRectangleByCenter(ev.point, ev.downPoint)
+                : this.geojsDisplay.findRowsInProjectRectangle?.(ev.point, ev.downPoint, onlyFullyContained))
+            : [];
+        const displayHitRows = this._uniqueRows(displaySourceRows).filter((row) => this._isDirectEmbeddingRow(row));
+        const projectHitRows = this._uniqueRows(projectSourceRows).filter((row) => this._isDirectEmbeddingRow(row));
+        const hitRows = projectHitRows.length > displayHitRows.length ? projectHitRows : displayHitRows;
+        const source = projectHitRows.length > displayHitRows.length ? 'project' : 'display';
+        const rows = this._filterDirectGeojsRows(hitRows);
+        const displayRect = this._pointRectSummary(downDisplayPoint, currentDisplayPoint);
+        const projectRect = this._pointRectSummary(ev?.downPoint, ev?.point);
+        this._lastGeojsDirectHitHadRows = hitRows.length > 0;
+        debugLog('geojs.selection', 'direct-hit-test-area', {
+            action: this.selection_action || 'select',
+            source,
+            rowCount: rows.length,
+            hitRowCount: hitRows.length,
+            displayHitRowCount: displayHitRows.length,
+            projectHitRowCount: projectHitRows.length,
+            filteredToSelected: deselectMode,
+            matchMode: deselectMode ? 'center' : (onlyFullyContained ? 'contained' : 'overlap'),
+            firstId: rows[0]?.id,
+            lastId: rows[rows.length - 1]?.id,
+            onlyFullyContained,
+            displayRect,
+            projectRect,
+            ...this._flatRectSummary('display', displayRect),
+            ...this._flatRectSummary('project', projectRect),
+        });
+        return rows;
     }
 
     _paperBoundsItemsAtPoint(point){
@@ -383,6 +655,7 @@ class SelectTool extends AnnotationUITool{
         const selectedItems = this.project.paperScope.findSelectedItems()
             .filter((item) => this._isItemSelectable(item));
         this._lastSelectionItems = selectedItems;
+        this._lastSelectionEmbeddingIds = [];
         this._replaceSelectionOnSync = false;
         selectedItems.forEach((item) => item.deselect(true));
         this.geojsDisplay?.scheduleUpdate();
@@ -400,8 +673,16 @@ class SelectTool extends AnnotationUITool{
     _applySelectionAction(items, keepExistingSelection, singleClick){
         const selectableItems = items.filter(item=>item && this._isItemSelectable(item));
         this._lastSelectionItems = selectableItems;
+        this._lastSelectionEmbeddingIds = [];
         const action = this.selection_action || 'select';
         this._replaceSelectionOnSync = false;
+        debugLog('geojs.selection', 'paper-selection-action', {
+            action,
+            itemCount: selectableItems.length,
+            firstEmbeddingId: selectableItems[0]?.embedding_id ?? selectableItems[0]?.data?.embedding_id ?? null,
+            keepExistingSelection,
+            singleClick,
+        });
 
         if (action === 'deselect') {
             selectableItems.forEach(item=>item.deselect(true));
@@ -412,11 +693,38 @@ class SelectTool extends AnnotationUITool{
 
         if (action === 'select') {
             selectableItems.forEach(item=>item.select(true));
+            if (selectableItems.length > 0) {
+                this.onSelectionChanged?.();
+            }
             this.geojsDisplay?.scheduleUpdate();
             return;
         }
 
         selectableItems.forEach(item=>item.toggle(keepExistingSelection));
+        this.geojsDisplay?.scheduleUpdate();
+    }
+
+    _applyEmbeddingSelectionAction(ids, keepExistingSelection, singleClick){
+        const action = this.selection_action || 'select';
+        const uniqueIds = Array.from(new Set((ids || []).filter((id) => id !== undefined && id !== null).map(String)));
+        const actionIds = action === 'deselect' && this.geojsDisplay?.isEmbeddingSelectedId
+            ? uniqueIds.filter((id) => this.geojsDisplay.isEmbeddingSelectedId(id))
+            : uniqueIds;
+        this._lastSelectionItems = [];
+        this._lastSelectionEmbeddingIds = actionIds;
+        this._replaceSelectionOnSync = false;
+        debugLog('geojs.selection', 'id-selection-action', {
+            action,
+            idCount: actionIds.length,
+            hitIdCount: uniqueIds.length,
+            filteredToSelected: action === 'deselect',
+            firstId: actionIds[0] ?? null,
+            lastId: actionIds[actionIds.length - 1] ?? null,
+            keepExistingSelection,
+            singleClick,
+        });
+        if (!actionIds.length) return;
+        this.onSelectionChanged?.();
         this.geojsDisplay?.scheduleUpdate();
     }
 

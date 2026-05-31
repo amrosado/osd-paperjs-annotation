@@ -45,7 +45,7 @@ import { AnnotationLayout } from './annotationlayout.mjs';
 import { AnnotationToolbar } from './annotationtoolbar.mjs';
 import { AnnotationToolset } from './annotationtoolset.mjs';
 import { PaperOverlay } from './paper-overlay.mjs';
-import { AnnotationDataStore } from './annotationdatastore.mjs';
+import { AnnotationDataStore, annotationDataActionTypes } from './annotationdatastore.mjs';
 import { GeoJSDisplay } from './geojsdisplay.mjs';
 import { LayerUI } from './layerui.mjs';
 import { AnnotationItemFactory } from './paperitems/annotationitem.mjs';
@@ -197,6 +197,9 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
                 redux: this.options.redux,
                 initialState: this.options.initialDataState,
             });
+        this._dataStoreProjectionVersion = null;
+        this._projectingDataStore = false;
+        this._unsubscribeDataStoreProjection = null;
         this._bindDataStoreEvents();
 
         // set the overlay to auto rescale items
@@ -237,6 +240,8 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
 
         paper.Item.fromGeoJSON = AnnotationItemFactory.itemFromGeoJSON;
         paper.Item.fromAnnotationItem = AnnotationItemFactory.itemFromAnnotationItem;
+
+        this._bindDataStoreProjection();
 
         if (this.options.addUI) {
             let uiOpts = {};
@@ -525,6 +530,8 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         if (this._toolset) this._toolset.destroy();
         this._toolset = null;
         this.disableGeoJSDisplay();
+        this._unsubscribeDataStoreProjection?.();
+        this._unsubscribeDataStoreProjection = null;
         this.dataStore?.destroy?.();
         this.overlay.destroy();
         this.raiseEvent('destroy');
@@ -683,6 +690,9 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
             } else {
                 this.dataStore.addFeatureCollections(geoJSON, { source: 'loadGeoJSON' });
             }
+            if (this.dataStore?.reduxEnabled) {
+                return;
+            }
         }
         let parentLayer = parentImage ? parentImage.paperLayer : false;
         if(replaceCurrent){
@@ -707,7 +717,9 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
                 console.warn('GeoJSON object not loaded: wrong type. Only FeatureCollection objects are currently supported');
             }
         })
-        this._scheduleDataStoreSync('loadGeoJSON');
+        if (!internalOptions.skipDataStoreSync) {
+            this._scheduleDataStoreSync('loadGeoJSON');
+        }
     }
 
     /**
@@ -798,6 +810,44 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         return new Placeholder(style);
     }
 
+    _bindDataStoreProjection() {
+        if (!this.dataStore?.reduxEnabled) return;
+        this._unsubscribeDataStoreProjection = this.dataStore.subscribe((state) => this._syncProjectFromDataStoreState(state));
+        this._syncProjectFromDataStoreState(this.dataStore.state);
+    }
+
+    _syncProjectFromDataStoreState(state) {
+        if (!this.dataStore?.reduxEnabled || !state) return;
+        const version = Number(state.version || 0);
+        if (this._dataStoreProjectionVersion === version) return;
+        this._dataStoreProjectionVersion = version;
+
+        const storeOnlyActions = new Set([
+            annotationDataActionTypes.SYNC_FROM_PROJECT,
+            annotationDataActionTypes.SET_CACHE,
+            annotationDataActionTypes.CLEAR_CACHE,
+        ]);
+        if (storeOnlyActions.has(state.lastAction)) return;
+
+        this._replaceProjectFeatureCollectionsFromDataStore(state.featureCollections || []);
+    }
+
+    _replaceProjectFeatureCollectionsFromDataStore(featureCollections) {
+        this._projectingDataStore = true;
+        try {
+            this.loadGeoJSON(featureCollections, true, undefined, {
+                skipDataStore: true,
+                skipDataStoreSync: true,
+            });
+            this.overlay.rescaleItems();
+            this.geojsDisplay?.syncFromStore?.();
+            this.geojsDisplay?.scheduleUpdate?.();
+            this.paperScope?.view?.update?.();
+        } finally {
+            this._projectingDataStore = false;
+        }
+    }
+
     _bindDataStoreEvents() {
         const project = this.paperScope?.project;
         if (!project) return;
@@ -809,11 +859,15 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
             'item-removed',
             'items-changed',
         ].forEach((eventName) => {
-            project.on(eventName, () => this._scheduleDataStoreSync(eventName));
+            project.on(eventName, (event) => this._scheduleDataStoreSync(eventName, event));
         });
     }
 
-    _scheduleDataStoreSync(reason) {
+    _scheduleDataStoreSync(reason, event = {}) {
+        const item = event?.item;
+        if (this._projectingDataStore || item?.data?.wsvvEmbeddingGrid || item?.data?.wsvvLazyGeoJSPaperItem || event?.source === 'render_annotations') {
+            return;
+        }
         if (!this.dataStore || this._dataStoreSyncPending) return;
         this._dataStoreSyncPending = true;
         const sync = () => {

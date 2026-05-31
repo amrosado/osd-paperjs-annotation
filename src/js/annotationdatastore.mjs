@@ -17,6 +17,7 @@ const initialAnnotationDataState = Object.freeze({
     cached: Object.freeze({}),
     version: 0,
     lastAction: null,
+    lastMeta: null,
 });
 
 function cloneData(value) {
@@ -30,11 +31,12 @@ function normalizeFeatureCollections(featureCollections) {
     return cloneData(Array.isArray(featureCollections) ? featureCollections : [featureCollections]);
 }
 
-function withMutationMetadata(state, actionType) {
+function withMutationMetadata(state, actionType, meta = null) {
     return {
         ...state,
         version: (state.version || 0) + 1,
         lastAction: actionType,
+        lastMeta: cloneData(meta),
     };
 }
 
@@ -115,14 +117,14 @@ function annotationDataReducer(state = initialAnnotationDataState, action = {}) 
             return withMutationMetadata({
                 ...initialAnnotationDataState,
                 ...cloneData(action.payload),
-            }, action.type);
+            }, action.type, action.meta);
 
         case ACTION_TYPES.REPLACE_FEATURE_COLLECTIONS:
         case ACTION_TYPES.SYNC_FROM_PROJECT:
             return withMutationMetadata({
                 ...state,
                 featureCollections: normalizeFeatureCollections(action.payload?.featureCollections),
-            }, action.type);
+            }, action.type, action.meta);
 
         case ACTION_TYPES.ADD_FEATURE_COLLECTIONS:
             return withMutationMetadata({
@@ -131,7 +133,7 @@ function annotationDataReducer(state = initialAnnotationDataState, action = {}) 
                     ...normalizeFeatureCollections(state.featureCollections),
                     ...normalizeFeatureCollections(action.payload?.featureCollections),
                 ],
-            }, action.type);
+            }, action.type, action.meta);
 
         case ACTION_TYPES.UPSERT_FEATURE_COLLECTION: {
             const featureCollection = cloneData(action.payload?.featureCollection);
@@ -143,7 +145,7 @@ function annotationDataReducer(state = initialAnnotationDataState, action = {}) 
                     featureCollection,
                     action.payload?.matcher,
                 ),
-            }, action.type);
+            }, action.type, action.meta);
         }
 
         case ACTION_TYPES.REMOVE_FEATURE_COLLECTION:
@@ -152,13 +154,13 @@ function annotationDataReducer(state = initialAnnotationDataState, action = {}) 
                 featureCollections: normalizeFeatureCollections(state.featureCollections).filter(
                     (featureCollection, index) => !collectionMatches(featureCollection, action.payload?.matcher, index),
                 ),
-            }, action.type);
+            }, action.type, action.meta);
 
         case ACTION_TYPES.CLEAR_FEATURE_COLLECTIONS:
             return withMutationMetadata({
                 ...state,
                 featureCollections: [],
-            }, action.type);
+            }, action.type, action.meta);
 
         case ACTION_TYPES.SET_CACHE:
             if (action.payload?.key == null) return state;
@@ -168,15 +170,15 @@ function annotationDataReducer(state = initialAnnotationDataState, action = {}) 
                     ...(state.cached || {}),
                     [action.payload.key]: normalizeFeatureCollections(action.payload.featureCollections),
                 },
-            }, action.type);
+            }, action.type, action.meta);
 
         case ACTION_TYPES.CLEAR_CACHE: {
             if (action.payload?.key == null) {
-                return withMutationMetadata({ ...state, cached: {} }, action.type);
+                return withMutationMetadata({ ...state, cached: {} }, action.type, action.meta);
             }
             const cached = { ...(state.cached || {}) };
             delete cached[action.payload.key];
-            return withMutationMetadata({ ...state, cached }, action.type);
+            return withMutationMetadata({ ...state, cached }, action.type, action.meta);
         }
 
         default:
@@ -193,15 +195,19 @@ class AnnotationDataStore {
         this._dispatch = reduxOptions.dispatch || reduxOptions.store?.dispatch?.bind(reduxOptions.store);
         this._getState = reduxOptions.getState || reduxOptions.store?.getState?.bind(reduxOptions.store);
         this._unsubscribeRedux = null;
+        this._hasReduxSubscription = Boolean(this._reduxEnabled && reduxOptions.store?.subscribe);
         this._listeners = new Set();
         this._state = annotationDataReducer(initialAnnotationDataState, annotationDataActions.hydrate(options.initialState || {}));
+        this._lastReduxNotificationVersion = 0;
 
         if (this._reduxEnabled && (!this._dispatch || !this._getState)) {
             throw new Error('AnnotationDataStore redux mode requires a Redux store or dispatch/getState pair.');
         }
 
-        if (this._reduxEnabled && reduxOptions.store?.subscribe) {
-            this._unsubscribeRedux = reduxOptions.store.subscribe(() => this._notify());
+        this._lastReduxNotificationVersion = Number(this.state?.version || 0);
+
+        if (this._hasReduxSubscription) {
+            this._unsubscribeRedux = reduxOptions.store.subscribe(() => this._notifyReduxIfChanged());
         }
     }
 
@@ -217,6 +223,9 @@ class AnnotationDataStore {
     dispatch(action) {
         if (this._reduxEnabled) {
             this._dispatch(action);
+            if (!this._hasReduxSubscription) {
+                this._notify();
+            }
         } else {
             this._state = annotationDataReducer(this._state, action);
             this._notify();
@@ -280,8 +289,15 @@ class AnnotationDataStore {
         return JSON.stringify(this.toGeoJSON(), replacer, space);
     }
 
-    _notify() {
+    _notifyReduxIfChanged() {
         const state = this.state;
+        const version = Number(state?.version || 0);
+        if (version === this._lastReduxNotificationVersion) return;
+        this._lastReduxNotificationVersion = version;
+        this._notify(state);
+    }
+
+    _notify(state = this.state) {
         this._listeners.forEach((listener) => listener(state));
     }
 }
