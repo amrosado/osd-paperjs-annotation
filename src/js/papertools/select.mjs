@@ -73,6 +73,16 @@ class SelectTool extends AnnotationUITool{
         this._viewportChangedDuringSelectionPointer = false;
         this._selectionViewportChangeHandler = null;
         this._selectionDownDisplayPoint = null;
+        this.selection_mode = 'rectangle';
+        this._polygonDisplayPoints = [];
+        this._polygonProjectPoints = [];
+        this._polygonPreviewDisplayPoint = null;
+        this._polygonContextMenuTarget = null;
+        this._polygonContextMenuHandler = null;
+        this._selectionOverlayLayout = null;
+        this._selectionMarqueeFrame = null;
+        this._pendingSelectionMarqueePoints = null;
+        this._polygonVisualFrame = null;
         this.setToolbarControl(new SelectToolbar(this));
         this.registerOverlayCursorOwnedClasses('selectable-layer');
 
@@ -110,8 +120,48 @@ class SelectTool extends AnnotationUITool{
             zIndex: '20',
         });
         this.project.overlay?._canvasdiv?.appendChild(selectionMarquee);
+        this._selectionMarquee = selectionMarquee;
+
+        const polygonMarquee = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        polygonMarquee.classList.add('annotation-polygon-marquee');
+        Object.assign(polygonMarquee.style, {
+            position: 'absolute',
+            display: 'none',
+            pointerEvents: 'none',
+            left: '0px',
+            top: '0px',
+            zIndex: '21',
+            overflow: 'visible',
+        });
+        const polygonFill = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        polygonFill.setAttribute('fill', 'rgba(31, 159, 184, 0.14)');
+        polygonFill.setAttribute('stroke', 'none');
+        const polygonLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+        polygonLine.setAttribute('fill', 'none');
+        polygonLine.setAttribute('stroke', '#111827');
+        polygonLine.setAttribute('stroke-width', '3');
+        polygonLine.setAttribute('stroke-linejoin', 'round');
+        polygonLine.setAttribute('stroke-linecap', 'round');
+        const polygonLineAccent = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+        polygonLineAccent.setAttribute('fill', 'none');
+        polygonLineAccent.setAttribute('stroke', '#f8fafc');
+        polygonLineAccent.setAttribute('stroke-width', '1.5');
+        polygonLineAccent.setAttribute('stroke-dasharray', '6 4');
+        polygonLineAccent.setAttribute('stroke-linejoin', 'round');
+        polygonLineAccent.setAttribute('stroke-linecap', 'round');
+        polygonMarquee.append(polygonFill, polygonLine, polygonLineAccent);
+        this._polygonMarquee = polygonMarquee;
+        this._polygonFill = polygonFill;
+        this._polygonLine = polygonLine;
+        this._polygonLineAccent = polygonLineAccent;
+        this.project.overlay?._canvasdiv?.appendChild(polygonMarquee);
 
         const hideSelectionMarquee = () => {
+            self._pendingSelectionMarqueePoints = null;
+            if (self._selectionMarqueeFrame) {
+                self._cancelAnimationFrame(self._selectionMarqueeFrame);
+                self._selectionMarqueeFrame = null;
+            }
             selectionMarquee.style.display = 'none';
         };
         const updateSelectionMarquee = (displayPointA, displayPointB) => {
@@ -119,34 +169,20 @@ class SelectTool extends AnnotationUITool{
                 hideSelectionMarquee();
                 return;
             }
-            const geoRect = self.geojsDisplay?.element?.getBoundingClientRect?.();
-            const parentRect = selectionMarquee.parentElement?.getBoundingClientRect?.();
-            if (!geoRect || !parentRect) {
-                hideSelectionMarquee();
-                return;
-            }
-            const pointA = {
-                x: geoRect.left + displayPointA.x - parentRect.left,
-                y: geoRect.top + displayPointA.y - parentRect.top,
-            };
-            const pointB = {
-                x: geoRect.left + displayPointB.x - parentRect.left,
-                y: geoRect.top + displayPointB.y - parentRect.top,
-            };
-            const left = Math.min(pointA.x, pointB.x);
-            const top = Math.min(pointA.y, pointB.y);
-            const width = Math.abs(pointA.x - pointB.x);
-            const height = Math.abs(pointA.y - pointB.y);
-            selectionMarquee.style.display = "block";
-            selectionMarquee.style.left = left + "px";
-            selectionMarquee.style.top = top + "px";
-            selectionMarquee.style.width = Math.max(width, 1) + "px";
-            selectionMarquee.style.height = Math.max(height, 1) + "px";
+            self._pendingSelectionMarqueePoints = { displayPointA, displayPointB };
+            if (self._selectionMarqueeFrame) return;
+            self._selectionMarqueeFrame = self._requestAnimationFrame(() => {
+                self._selectionMarqueeFrame = null;
+                const pending = self._pendingSelectionMarqueePoints;
+                if (!pending) return;
+                self._drawSelectionMarquee(selectionMarquee, pending.displayPointA, pending.displayPointB);
+            });
         };
         
         this.extensions.onActivate=function(){ 
             self.geojsDisplay?.finishPaperEdit();
             self.tool.onMouseMove = (ev)=>self.onMouseMove(ev);
+            self._bindPolygonContextMenuHandler();
             self._bindViewportNavigationGuard();
             self.clearOverlayCursorOwnedClasses();
         }    
@@ -156,6 +192,10 @@ class SelectTool extends AnnotationUITool{
             selectionRectangle.selected = false;
             sr2.selected = false;
             hideSelectionMarquee();
+            self._resetPolygonSelection();
+            self._cancelSelectionPreviewFrames();
+            self._invalidateSelectionOverlayLayout();
+            self._unbindPolygonContextMenuHandler();
             self._selectionPointerActive = false;
             self._viewportChangedDuringSelectionPointer = false;
             self._selectionDownDisplayPoint = null;
@@ -165,13 +205,42 @@ class SelectTool extends AnnotationUITool{
         }
         this.tool.extensions.onKeyUp=function(ev){
             if(ev.key=='escape'){
+                if (self.selection_mode === 'polygon' && self._polygonDisplayPoints.length) {
+                    self._resetPolygonSelection();
+                    return;
+                }
                 self.clearSelection();
             }
         }
 
         this.tool.onMouseDown=function(ev){
+            const nativeEvent = ev?.event || null;
+            if (self.selection_mode === 'polygon') {
+                if (nativeEvent?.button === 2) {
+                    self._consumeSelectionPointerEvent(ev);
+                    self._finalizePolygonSelection(nativeEvent);
+                    return;
+                }
+                if (!annotationToolPrimaryButtonDownOrUp(ev)) return;
+                self._consumeSelectionPointerEvent(ev);
+                self._invalidateSelectionOverlayLayout();
+                const displayPoint = self._eventDisplayPoint(ev);
+                if (!displayPoint || !ev?.point) return;
+                self._polygonDisplayPoints.push(displayPoint);
+                self._polygonProjectPoints.push(ev.point.clone ? ev.point.clone() : new paper.Point(ev.point.x, ev.point.y));
+                self._polygonPreviewDisplayPoint = null;
+                self._schedulePolygonSelectionVisual();
+                debugLog('geojs.selection', 'polygon-point-added', {
+                    action: self.selection_action || 'select',
+                    pointCount: self._polygonDisplayPoints.length,
+                    displayX: Number(displayPoint.x.toFixed(2)),
+                    displayY: Number(displayPoint.y.toFixed(2)),
+                });
+                return;
+            }
             if (!annotationToolPrimaryButtonDownOrUp(ev)) return;
             self._consumeSelectionPointerEvent(ev);
+            self._invalidateSelectionOverlayLayout();
             self._selectionPointerActive = true;
             self._viewportChangedDuringSelectionPointer = false;
             self._selectionDownDisplayPoint = self._eventDisplayPoint(ev);
@@ -189,6 +258,7 @@ class SelectTool extends AnnotationUITool{
          * @property {Item[]} selectedItems - An array of selected items to be deselected.
          */        
         this.tool.onMouseUp=function(ev){
+            if (self.selection_mode === 'polygon') return;
             if (annotationToolPrimaryButtonDownOrUp(ev)) {
                 self._consumeSelectionPointerEvent(ev);
             }
@@ -244,7 +314,7 @@ class SelectTool extends AnnotationUITool{
                         firstId: row?.id,
                         keepExistingSelection,
                     });
-                    const paperItem = self.geojsDisplay?.getPaperItemForRow?.(row);
+                    const paperItem = self.geojsDisplay?.getPaperItemForRow?.(row, { create: true });
                     if (paperItem) {
                         debugLog('geojs.selection', 'direct-click-materialized', {
                             id: row?.id,
@@ -293,19 +363,10 @@ class SelectTool extends AnnotationUITool{
          * @property {Rectangle} r - The bounding rectangle of the selection area.
          */
         this.tool.onMouseDrag = function(ev){
+            if (self.selection_mode === 'polygon') return;
             if (!annotationToolPrimaryButtonActiveDrag(ev)) return;
             self._consumeSelectionPointerEvent(ev);
-            self.project.toolLayer.bringToFront();
-            selectionRectangle.bringToFront();
-            sr2.bringToFront();
-            selectionRectangle.visible=false;
-            sr2.visible=false;
-            selectionRectangle.selected=false;
-            sr2.selected=false;
             updateSelectionMarquee(self._selectionDownDisplayPoint, self._eventDisplayPoint(ev));
-            let r=new paper.Rectangle(ev.downPoint,ev.point);
-            selectionRectangle.set({segments:[r.topLeft, r.topRight, r.bottomRight, r.bottomLeft]});
-            sr2.set({segments:[r.topLeft, r.topRight, r.bottomRight, r.bottomLeft]});
             // console.log(selectionRectangle.visible, selectionRectangle.segments)
         }
     }
@@ -334,6 +395,14 @@ class SelectTool extends AnnotationUITool{
    * @param {Object} ev - The mouse move event object containing information about the cursor position.
    */
     onMouseMove(ev){
+        if (this.selection_mode === 'polygon') {
+            if (this._polygonDisplayPoints.length) {
+                this._polygonPreviewDisplayPoint = this._eventDisplayPoint(ev);
+                this._schedulePolygonSelectionVisual();
+            }
+            return;
+        }
+        if (this._selectionPointerActive) return;
         const hoverItem = this._geojsPaperItemAtEvent(ev) || ev.item;
         if(hoverItem && this._isItemSelectable(hoverItem)){
             if(this.currentItem != hoverItem) (hoverItem.emit('selection:mouseenter')||true) 
@@ -463,6 +532,225 @@ class SelectTool extends AnnotationUITool{
             geoRect: summarizeRect(geoRect),
             canvasRect: summarizeRect(canvasRect),
         };
+    }
+
+    _bindPolygonContextMenuHandler(){
+        const target = this.project?.overlay?._canvasdiv
+            || this.project?.overlay?._canvas
+            || this.geojsDisplay?.element
+            || null;
+        if (!target || this._polygonContextMenuTarget === target) return;
+        this._unbindPolygonContextMenuHandler();
+        this._polygonContextMenuHandler = (event) => {
+            if (this.selection_mode !== 'polygon') return;
+            event.preventDefault?.();
+            event.stopPropagation?.();
+            event.stopImmediatePropagation?.();
+            if (this._polygonDisplayPoints.length) {
+                this._finalizePolygonSelection(event);
+            }
+        };
+        target.addEventListener('contextmenu', this._polygonContextMenuHandler, true);
+        this._polygonContextMenuTarget = target;
+    }
+
+    _unbindPolygonContextMenuHandler(){
+        if (this._polygonContextMenuTarget && this._polygonContextMenuHandler) {
+            this._polygonContextMenuTarget.removeEventListener('contextmenu', this._polygonContextMenuHandler, true);
+        }
+        this._polygonContextMenuTarget = null;
+        this._polygonContextMenuHandler = null;
+    }
+
+    _resetPolygonSelection(){
+        this._polygonDisplayPoints = [];
+        this._polygonProjectPoints = [];
+        this._polygonPreviewDisplayPoint = null;
+        this._schedulePolygonSelectionVisual();
+    }
+
+    _requestAnimationFrame(callback){
+        const raf = globalThis.requestAnimationFrame || ((fn) => globalThis.setTimeout(fn, 16));
+        return raf(callback);
+    }
+
+    _cancelAnimationFrame(frameId){
+        const cancel = globalThis.cancelAnimationFrame || globalThis.clearTimeout;
+        cancel?.(frameId);
+    }
+
+    _cancelSelectionPreviewFrames(){
+        if (this._selectionMarqueeFrame) {
+            this._cancelAnimationFrame(this._selectionMarqueeFrame);
+            this._selectionMarqueeFrame = null;
+        }
+        if (this._polygonVisualFrame) {
+            this._cancelAnimationFrame(this._polygonVisualFrame);
+            this._polygonVisualFrame = null;
+        }
+        this._pendingSelectionMarqueePoints = null;
+    }
+
+    _invalidateSelectionOverlayLayout(){
+        this._selectionOverlayLayout = null;
+    }
+
+    _selectionOverlayPoint(displayPoint, layout){
+        if (!displayPoint || !layout) return null;
+        return {
+            x: layout.geoLeftOffset + displayPoint.x,
+            y: layout.geoTopOffset + displayPoint.y,
+        };
+    }
+
+    _getSelectionOverlayLayout(){
+        if (this._selectionOverlayLayout) return this._selectionOverlayLayout;
+        const geoRect = this.geojsDisplay?.element?.getBoundingClientRect?.();
+        const parentRect = (this._selectionMarquee?.parentElement || this._polygonMarquee?.parentElement)?.getBoundingClientRect?.();
+        if (!geoRect || !parentRect) return null;
+        this._selectionOverlayLayout = {
+            geoLeftOffset: geoRect.left - parentRect.left,
+            geoTopOffset: geoRect.top - parentRect.top,
+            parentWidth: Math.max(1, parentRect.width),
+            parentHeight: Math.max(1, parentRect.height),
+        };
+        return this._selectionOverlayLayout;
+    }
+
+    _drawSelectionMarquee(selectionMarquee, displayPointA, displayPointB){
+        const layout = this._getSelectionOverlayLayout();
+        if (!layout) {
+            selectionMarquee.style.display = 'none';
+            return;
+        }
+        const pointA = this._selectionOverlayPoint(displayPointA, layout);
+        const pointB = this._selectionOverlayPoint(displayPointB, layout);
+        if (!pointA || !pointB) {
+            selectionMarquee.style.display = 'none';
+            return;
+        }
+        const left = Math.min(pointA.x, pointB.x);
+        const top = Math.min(pointA.y, pointB.y);
+        const width = Math.abs(pointA.x - pointB.x);
+        const height = Math.abs(pointA.y - pointB.y);
+        selectionMarquee.style.display = 'block';
+        selectionMarquee.style.left = left + 'px';
+        selectionMarquee.style.top = top + 'px';
+        selectionMarquee.style.width = Math.max(width, 1) + 'px';
+        selectionMarquee.style.height = Math.max(height, 1) + 'px';
+    }
+
+    _displayToPolygonOverlayPoint(displayPoint, layout = this._getSelectionOverlayLayout()){
+        return this._selectionOverlayPoint(displayPoint, layout);
+    }
+
+    _schedulePolygonSelectionVisual(){
+        if (this._polygonVisualFrame) return;
+        this._polygonVisualFrame = this._requestAnimationFrame(() => {
+            this._polygonVisualFrame = null;
+            this._drawPolygonSelectionVisual();
+        });
+    }
+
+    _drawPolygonSelectionVisual(){
+        const svg = this._polygonMarquee;
+        if (!svg || !this._polygonLine || !this._polygonLineAccent || !this._polygonFill) return;
+        if (!this._polygonDisplayPoints.length) {
+            svg.style.display = 'none';
+            return;
+        }
+        const layout = this._getSelectionOverlayLayout();
+        if (!layout) {
+            svg.style.display = 'none';
+            return;
+        }
+        const displayPoints = this._polygonPreviewDisplayPoint
+            ? this._polygonDisplayPoints.concat([this._polygonPreviewDisplayPoint])
+            : this._polygonDisplayPoints;
+        const overlayPoints = displayPoints
+            .map((point) => this._displayToPolygonOverlayPoint(point, layout))
+            .filter(Boolean);
+        if (!overlayPoints.length) {
+            svg.style.display = 'none';
+            return;
+        }
+        svg.style.display = 'block';
+        svg.style.width = layout.parentWidth + 'px';
+        svg.style.height = layout.parentHeight + 'px';
+        svg.setAttribute('viewBox', `0 0 ${layout.parentWidth} ${layout.parentHeight}`);
+        const pointString = overlayPoints.map((point) => `${point.x},${point.y}`).join(' ');
+        this._polygonLine.setAttribute('points', pointString);
+        this._polygonLineAccent.setAttribute('points', pointString);
+        this._polygonFill.setAttribute('points', this._polygonDisplayPoints.length >= 3
+            ? this._polygonDisplayPoints
+                .map((point) => this._displayToPolygonOverlayPoint(point, layout))
+                .filter(Boolean)
+                .map((point) => `${point.x},${point.y}`)
+                .join(' ')
+            : '');
+    }
+
+    _finalizePolygonSelection(nativeEvent = null){
+        if (this._polygonDisplayPoints.length < 3) {
+            this._resetPolygonSelection();
+            return;
+        }
+        const keepExistingSelection = true;
+        const displayPoints = this._polygonDisplayPoints.slice();
+        const projectPoints = this._polygonProjectPoints.slice();
+        const geojsRows = this._geojsDirectRowsInPolygon(displayPoints);
+        debugLogJson('geojs.selection', 'polygon-finalize', {
+            action: this.selection_action || 'select',
+            pointCount: displayPoints.length,
+            geojsRowCount: geojsRows.length,
+            keepExistingSelection,
+            button: nativeEvent?.button ?? null,
+            firstId: geojsRows[0]?.id ?? null,
+            idSampleJson: JSON.stringify(geojsRows.slice(0, 24).map((row) => row.id)),
+        });
+        this._resetPolygonSelection();
+        if (geojsRows.length) {
+            this._applyEmbeddingSelectionAction(geojsRows.map((row) => row.id), keepExistingSelection, false);
+            return;
+        }
+        const hitItems = this._paperBoundsItemsInPolygon(projectPoints);
+        this._applySelectionAction(hitItems, keepExistingSelection, false);
+    }
+
+    _geojsDirectRowsInPolygon(displayPoints){
+        if (!this.geojsDisplay?.enabled || !this.geojsDisplay.findDirectEmbeddingRowsInDisplayPolygon) return [];
+        const hitRows = (this.geojsDisplay.findDirectEmbeddingRowsInDisplayPolygon(displayPoints) || [])
+            .filter((row) => this._isDirectEmbeddingRow(row));
+        const rows = this._filterDirectGeojsRows(hitRows);
+        this._lastGeojsDirectHitHadRows = hitRows.length > 0;
+        return rows;
+    }
+
+    _pointInPolygon(point, polygon){
+        if (!point || !polygon?.length) return false;
+        let inside = false;
+        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+            const xi = Number(polygon[i].x);
+            const yi = Number(polygon[i].y);
+            const xj = Number(polygon[j].x);
+            const yj = Number(polygon[j].y);
+            const intersects = ((yi > point.y) !== (yj > point.y))
+                && (point.x < ((xj - xi) * (point.y - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+            if (intersects) inside = !inside;
+        }
+        return inside;
+    }
+
+    _paperBoundsItemsInPolygon(projectPoints){
+        if (!projectPoints?.length) return [];
+        return this.project.paperScope.annotationToolkit.getFeatures().filter((item) => {
+            const bounds = this._paperItemProjectBounds(item);
+            if (!bounds) return false;
+            return this._pointInPolygon({
+                x: bounds.center.x,
+                y: bounds.center.y,
+            }, projectPoints);
+        });
     }
 
     _geojsPaperItemAtEvent(ev){

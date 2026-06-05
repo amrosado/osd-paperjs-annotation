@@ -44,37 +44,65 @@ function wheelZoomDelta(event) {
     return -Number(event.deltaY || 0) * modeScale;
 }
 
-function tileLayerParamsForFile(file) {
+function maxLevelForFile(file) {
+    const info = file?.file_tile_info || {};
+    return Math.max(0, Number(info.levels || 1) - 1);
+}
+
+function maxLevelForFiles(files) {
+    return Math.max(0, ...(files || []).map(maxLevelForFile));
+}
+
+function tileLayerParamsForFile(file, mapMaxLevel = null) {
     const info = file?.file_tile_info || {};
     const width = finitePositive(info.sizeX);
     const height = finitePositive(info.sizeY);
     const tileWidth = finitePositive(info.tileWidth, 256);
     const tileHeight = finitePositive(info.tileHeight, tileWidth);
-    const maxLevel = Math.max(0, Number(info.levels || 1) - 1);
+    const sourceMaxLevel = maxLevelForFile(file);
+    const virtualMaxLevel = Math.max(sourceMaxLevel, Number.isFinite(Number(mapMaxLevel)) ? Number(mapMaxLevel) : sourceMaxLevel);
+    const sourceLevelOffset = virtualMaxLevel - sourceMaxLevel;
     const params = geoUtil.pixelCoordinateParams(null, width, height, tileWidth, tileHeight);
+    const sourceLevelForMapLevel = (level) => Math.max(
+        0,
+        Math.min(sourceMaxLevel, Math.floor(Number(level || 0) - sourceLevelOffset)),
+    );
 
-    params.map.max = maxLevel;
-    params.map.unitsPerPixel = Math.pow(2, maxLevel);
-    params.layer.minLevel = 0;
-    params.layer.maxLevel = maxLevel;
+    params.map.max = virtualMaxLevel;
+    params.map.unitsPerPixel = Math.pow(2, virtualMaxLevel);
+    params.layer.minLevel = sourceLevelOffset;
+    params.layer.maxLevel = virtualMaxLevel;
     params.layer.tileWidth = tileWidth;
     params.layer.tileHeight = tileHeight;
     params.layer.tilesAtZoom = (level) => {
-        const scale = Math.pow(2, maxLevel - level);
+        const sourceLevel = sourceLevelForMapLevel(level);
+        const scale = Math.pow(2, sourceMaxLevel - sourceLevel);
         return {
             x: Math.ceil(width / tileWidth / scale),
             y: Math.ceil(height / tileHeight / scale),
         };
     };
     params.layer.tilesMaxBounds = (level) => {
-        const scale = Math.pow(2, maxLevel - level);
+        const sourceLevel = sourceLevelForMapLevel(level);
+        const scale = Math.pow(2, sourceMaxLevel - sourceLevel);
         return {
             x: Math.floor(width / scale),
             y: Math.floor(height / scale),
         };
     };
 
-    return { params, width, height, tileWidth, tileHeight, maxLevel };
+    return {
+        params,
+        width,
+        height,
+        tileWidth,
+        tileHeight,
+        maxLevel: virtualMaxLevel,
+        mapMaxLevel: virtualMaxLevel,
+        sourceMaxLevel,
+        sourceLevelOffset,
+        sourceLevelForMapLevel,
+    };
 }
 
 function levelScale(maxLevel, level) {
@@ -349,12 +377,13 @@ class GeoJSPaperViewport extends OpenSeadragon.EventSource {
     }
 
     goHome() {
-        this.viewer.geoMap.bounds({
+        const bounds = copyGeoBounds(this.viewer._layoutBounds) || {
             left: 0,
             top: 0,
             right: this.imageWidth,
             bottom: this.imageHeight,
-        });
+        };
+        this.viewer.geoMap.bounds(bounds);
         this.viewer._notifyViewportChanged({ finish: true });
         return this;
     }
@@ -509,10 +538,15 @@ class GeoJSPaperTiledImage extends OpenSeadragon.EventSource {
 }
 
 class GeoJSPaperViewer extends OpenSeadragon.EventSource {
-    constructor({ id = 'osd', firstFile = null, prefixUrl = DEFAULT_PREFIX_URL } = {}) {
+    constructor({ id = 'osd', firstFile = null, files = [], prefixUrl = DEFAULT_PREFIX_URL } = {}) {
         super();
         const info = firstFile?.file_tile_info || {};
-        const firstParams = tileLayerParamsForFile(firstFile || { file_tile_info: { sizeX: 1, sizeY: 1, tileWidth: 256, levels: 1 } });
+        const sourceFiles = Array.isArray(files) && files.length ? files : (firstFile ? [firstFile] : []);
+        this._mapMaxLevel = maxLevelForFiles(sourceFiles);
+        const firstParams = tileLayerParamsForFile(
+            firstFile || { file_tile_info: { sizeX: 1, sizeY: 1, tileWidth: 256, levels: 1 } },
+            this._mapMaxLevel,
+        );
 
         this.isGeoJSTileViewer = true;
         this.prefixUrl = prefixUrl;
@@ -617,10 +651,17 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
                 levels: (tileSource.maxLevel ?? 0) + 1,
             },
         };
-        const { params, maxLevel } = tileLayerParamsForFile(file);
+        const {
+            params,
+            maxLevel,
+            mapMaxLevel,
+            sourceMaxLevel,
+            sourceLevelOffset,
+            sourceLevelForMapLevel,
+        } = tileLayerParamsForFile(file, this._mapMaxLevel);
         const layoutBounds = this._resolveLayerBounds(file, options.geojsBounds);
         const url = (x, y, level) => tileSource.getTileUrl
-            ? tileSource.getTileUrl(level, x, y)
+            ? tileSource.getTileUrl(sourceLevelForMapLevel(level), x, y)
             : '';
         const layer = this.geoMap.createLayer('osm', {
             ...params.layer,
@@ -628,7 +669,7 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
             url,
             keepLower: true,
             tileOffset: (level) => {
-                const scale = levelScale(maxLevel, level);
+                const scale = this.geoMap?.unitsPerPixel?.(level) || levelScale(maxLevel, level);
                 return {
                     x: -layoutBounds.x / scale,
                     y: -layoutBounds.y / scale,
@@ -639,6 +680,9 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
             opacity: 1,
         });
         const tiledImage = new GeoJSPaperTiledImage(this, file, layer, options.index ?? this.world.getItemCount(), layoutBounds);
+        tiledImage.source.mapMaxLevel = mapMaxLevel;
+        tiledImage.source.sourceMaxLevel = sourceMaxLevel;
+        tiledImage.source.sourceLevelOffset = sourceLevelOffset;
         this.tileSources.push(tileSource);
         this._layerBounds.push(layoutBounds);
         this._applyLayoutBounds();

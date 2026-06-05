@@ -175,10 +175,14 @@ class AnnotationUITool extends ToolBase{
         const viewer = this.project.paperScope.overlay.viewer;
         const canvas = viewer.canvas;
         this._canvasPriorZIndex = window.getComputedStyle(canvas)['z-index'];
-        const siblings = Array.from(viewer.canvas.parentElement.children).filter(c => c!==canvas);
-        const maxZ = Math.max(...siblings.map(el => {
+        const protectedUiSelector = '.AnnotationUIControls, .WsiViewerLoading, .WsiFileLabelsOverlay';
+        const siblings = Array.from(viewer.canvas.parentElement.children).filter((c) => (
+            c !== canvas && !c.matches?.(protectedUiSelector)
+        ));
+        const maxZ = Math.max(0, ...siblings.map((el) => {
             const z = window.getComputedStyle(el)['z-index'];
-            return z === 'auto' ? 0 : parseInt(z);
+            const parsed = z === 'auto' ? 0 : parseInt(z, 10);
+            return Number.isFinite(parsed) ? parsed : 0;
         }));
         canvas.style['z-index'] = maxZ + 1;
     }

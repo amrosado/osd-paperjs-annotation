@@ -995,7 +995,7 @@ class GeoJSDisplay {
 
     _bindClickHitTesting() {
         const handler = (event) => {
-            if (this._activeToolUsesGeoJSSelection()) return;
+            if (!this.options.enableNonSelectionPaperEdit || this._activeToolUsesGeoJSSelection()) return;
             const row = this.hitTestRowAtEvent(event);
             if (!row) return;
             event.preventDefault();
@@ -1037,7 +1037,7 @@ class GeoJSDisplay {
     hitTestPaperItemsAtEvent(event) {
         return this.hitTestRowsAtEvent(event)
             .filter((row) => !row?.directEmbedding || row.paperItem)
-            .map((row) => this.getPaperItemForRow(row))
+            .map((row) => this.getPaperItemForRow(row, { create: false }))
             .filter(Boolean);
     }
 
@@ -1045,12 +1045,14 @@ class GeoJSDisplay {
         if (!point) return [];
         return this.hitTestRowsAtProjectPoint(point, tolerance)
             .filter((row) => !row?.directEmbedding || row.paperItem)
-            .map((row) => this.getPaperItemForRow(row))
+            .map((row) => this.getPaperItemForRow(row, { create: false }))
             .filter(Boolean);
     }
 
-    getPaperItemForRow(row) {
-        return this._findPaperItem(row) || this._createPaperItemForRow(row);
+    getPaperItemForRow(row, { create = false } = {}) {
+        const existing = this._findPaperItem(row);
+        if (existing || !create) return existing || null;
+        return this._createPaperItemForRow(row);
     }
 
     findPaperItemsInImageRectangle(pointA, pointB, onlyFullyContained = false) {
@@ -1065,7 +1067,7 @@ class GeoJSDisplay {
         this._featureRows.forEach((row) => {
             const bounds = this._rowImageBounds(row);
             if (!bounds || !this._boundsMatchRectangle(bounds, rect, onlyFullyContained)) return;
-            const item = this.getPaperItemForRow(row);
+            const item = this.getPaperItemForRow(row, { create: false });
             if (!item || seen.has(item)) return;
             items.push(item);
             seen.add(item);
@@ -1158,6 +1160,59 @@ class GeoJSDisplay {
         return rows;
     }
 
+    findDirectEmbeddingRowsInDisplayPolygon(points) {
+        this._beginHitTestDisplayFrame('direct-embedding-polygon');
+        const polygon = (points || [])
+            .map((point) => ({ x: Number(point?.x), y: Number(point?.y) }))
+            .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+        if (polygon.length < 3) return [];
+        const bounds = polygon.reduce((acc, point) => ({
+            minX: Math.min(acc.minX, point.x),
+            minY: Math.min(acc.minY, point.y),
+            maxX: Math.max(acc.maxX, point.x),
+            maxY: Math.max(acc.maxY, point.y),
+        }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+        const candidates = this.findDirectEmbeddingRowsInDisplayRectangle(
+            { x: bounds.minX, y: bounds.minY },
+            { x: bounds.maxX, y: bounds.maxY },
+            false,
+        );
+        const rows = candidates.filter((row) => {
+            const rowBounds = this._rowDisplayBounds(row);
+            if (!rowBounds) return false;
+            return this._displayPolygonContainsPoint(polygon, {
+                x: (rowBounds.minX + rowBounds.maxX) / 2,
+                y: (rowBounds.minY + rowBounds.maxY) / 2,
+            });
+        });
+        debugLogJson('geojs.selection', 'direct-polygon-hit-test', {
+            mode: 'center',
+            pointCount: polygon.length,
+            candidateCount: candidates.length,
+            rowCount: rows.length,
+            firstId: rows[0]?.id ?? null,
+            lastId: rows[rows.length - 1]?.id ?? null,
+            bounds,
+            rowSamplesJson: JSON.stringify(this._selectionRowSamples(rows)),
+            fileCountsJson: JSON.stringify(this._selectionFileCounts(rows)),
+        });
+        return rows;
+    }
+
+    _displayPolygonContainsPoint(polygon, point) {
+        let inside = false;
+        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+            const xi = polygon[i].x;
+            const yi = polygon[i].y;
+            const xj = polygon[j].x;
+            const yj = polygon[j].y;
+            const intersects = ((yi > point.y) !== (yj > point.y))
+                && (point.x < ((xj - xi) * (point.y - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+            if (intersects) inside = !inside;
+        }
+        return inside;
+    }
+
     findDirectEmbeddingRowsInDisplayRectangleByCenter(pointA, pointB) {
         this._beginHitTestDisplayFrame('direct-embedding-rectangle-center');
         const mapRect = this._mapRectangleFromDisplayPoints(pointA, pointB);
@@ -1218,7 +1273,7 @@ class GeoJSDisplay {
             .forEach((row) => {
                 const bounds = this._rowDisplayBounds(row);
                 if (!bounds || !this._boundsMatchRectangle(bounds, rect, onlyFullyContained)) return;
-                const item = this.getPaperItemForRow(row);
+                const item = this.getPaperItemForRow(row, { create: false });
                 if (!item || seen.has(item)) return;
                 items.push(item);
                 seen.add(item);
