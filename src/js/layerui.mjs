@@ -63,7 +63,12 @@ class LayerUI extends OpenSeadragon.EventSource{
         let _this=this;
         this._tk = annotationToolkit
         this.paperScope = this._tk.paperScope;
-        this.paperScope.project.on('feature-collection-added',ev=>this._onFeatureCollectionAdded(ev));
+        this._collections = new Map();
+        this._onCollectionAdded = ev => this._onFeatureCollectionAdded(ev);
+        this._onProjectChanged = () => this._scheduleSync();
+        this.paperScope.project.on('feature-collection-added', this._onCollectionAdded);
+        this.paperScope.project.on('items-changed', this._onProjectChanged);
+        this._unsubscribeStore = this._tk.dataStore?.subscribe(() => this._scheduleSync());
         
         this.element = makeHTMLElement();
         this.iconFactory = new IconFactory(this.element.querySelector('.icon-factory-container'));
@@ -131,8 +136,8 @@ class LayerUI extends OpenSeadragon.EventSource{
         });
         
         this.element.addEventListener('value-changed',() => {
-            this.element.querySelector('.feature.selected').dispatchEvent(new Event('selected'));
-            this.element.querySelector('.feature-collection.active').dispatchEvent(new Event('selected'));
+            this.element.querySelector('.feature.selected')?.dispatchEvent(new Event('selected'));
+            this.element.querySelector('.feature-collection.active')?.dispatchEvent(new Event('selected'));
         });
 
         const totalOpacitySlider= this.element.querySelector('input.annotation-total-opacity');
@@ -142,10 +147,13 @@ class LayerUI extends OpenSeadragon.EventSource{
         totalOpacitySlider.dispatchEvent(new Event('input'));
 
         const fillOpacitySlider = this.element.querySelector('input.annotation-fill-opacity');
-        fillOpacitySlider.addEventListener('input',function(){
-            _this.paperScope.view.fillOpacity = this.value;
-        });
-        fillOpacitySlider.dispatchEvent(new Event('input'));
+        if (fillOpacitySlider) {
+            // Annotations are stroke-only; keep global fill multiplier at zero.
+            fillOpacitySlider.value = '0';
+            fillOpacitySlider.disabled = true;
+            fillOpacitySlider.closest('.annotation-opacity-container')?.classList.add('hidden');
+            _this.paperScope.view.fillOpacity = 0;
+        }
 
         /**
          * Set the opacity of the feature collections.
@@ -197,7 +205,54 @@ class LayerUI extends OpenSeadragon.EventSource{
                 })
             }
         }
-        
+        // The panel is lazy-created, often after a follower received its tree.
+        // Existing layers and their children need the same UI as future adds.
+        this.syncFromToolkit();
+    }
+
+    _scheduleSync() {
+        if (this._destroyed || this._syncPending) return;
+        this._syncPending = true;
+        queueMicrotask(() => {
+            this._syncPending = false;
+            if (!this._destroyed) this.syncFromToolkit();
+        });
+    }
+
+    setCollectionFilter(id = null) {
+        this._collectionFilter = id;
+        this.syncFromToolkit();
+    }
+
+    _collectionMatches(group) {
+        return this._collectionFilter == null || this._collectionFilter === (group.data?.annotationProperties?.annotation_set_id || '');
+    }
+
+    syncFromToolkit() {
+        const sync = () => {
+            const groups = (this._tk.getFeatureCollectionGroups?.() || []).filter(group => !(
+                group.data?.wsvvEmbeddingGrid || group.name === 'wsvv-embedding-grid'
+                || group.displayName === 'wsvv-embedding-grid'
+            ));
+            const current = new Set(groups);
+            for (const [group, ui] of this._collections) {
+                if (!current.has(group)) {
+                    ui.destroy();
+                    this._collections.delete(group);
+                }
+            }
+            for (const group of groups) {
+                const ui = this._onFeatureCollectionAdded({group});
+                ui?.updateLabel();
+                ui?.syncFeatures();
+                if (ui && !this._collectionMatches(group)) ui.element.remove();
+                else if (ui && !ui.element.parentElement) this.element.querySelector('.annotation-ui-feature-collections').appendChild(ui.element);
+            }
+            this._dragAndDrop?.refresh();
+        };
+        // Labels and rows are presentation only; do not alter annotations or
+        // cancel a local edit queued for Redux while reconciling this view.
+        sync();
     }
     /**
      * Hide the layer UI element.
@@ -237,6 +292,12 @@ class LayerUI extends OpenSeadragon.EventSource{
      * Destroy the layer UI element.
      */
     destroy(){
+        this._destroyed = true;
+        this.paperScope.project.off('feature-collection-added', this._onCollectionAdded);
+        this.paperScope.project.off('items-changed', this._onProjectChanged);
+        this._unsubscribeStore?.();
+        for (const ui of this._collections.values()) ui.destroy();
+        this._collections.clear();
         this.raiseEvent('destroy');
         this.element.remove();
     }
@@ -250,14 +311,20 @@ class LayerUI extends OpenSeadragon.EventSource{
      */
     _onFeatureCollectionAdded(ev){
         let grp = ev.group;
+        if (this._destroyed || !grp || grp.data?.wsvvEmbeddingGrid
+            || grp.name === 'wsvv-embedding-grid' || grp.displayName === 'wsvv-embedding-grid') return;
+        const existing = this._collections.get(grp);
+        if (existing) return existing;
         
         let fc=new FeatureCollectionUI(grp, {
             iconFactory: this.iconFactory
         });
-        this.element.querySelector('.annotation-ui-feature-collections').appendChild(fc.element);
+        this._collections.set(grp, fc);
+        if (this._collectionMatches(grp)) this.element.querySelector('.annotation-ui-feature-collections').appendChild(fc.element);
         this._dragAndDrop.refresh();
         fc.element.dispatchEvent(new Event('element-added'));
         setTimeout(function(){fc.element.classList.add('inserted'); }, 30);//this allows opacity fade-in to be triggered
+        return fc;
 
     }
     
@@ -283,8 +350,8 @@ function makeHTMLElement(){
                 <span class="annotation-opacity-container disable-when-annotations-hidden" title="Change total opacity">
                     <input class="annotation-total-opacity" type="range" min="0" max="1" step="0.01" value="1">
                 </span>
-                <span class="annotation-opacity-container disable-when-annotations-hidden" title="Change fill opacity">
-                    <input class="annotation-fill-opacity" type="range" min="0" max="1" step="0.01" value="0.25">
+                <span class="annotation-opacity-container disable-when-annotations-hidden hidden" title="Fill disabled">
+                    <input class="annotation-fill-opacity" type="range" min="0" max="1" step="0.01" value="0" disabled>
                 </span>
             </div>
             <div class='annotation-ui-feature-collections disable-when-annotations-hidden disable-when-deactivated'></div>

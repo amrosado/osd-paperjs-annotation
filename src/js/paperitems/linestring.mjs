@@ -85,7 +85,7 @@ class Linestring extends AnnotationItem{
      * @returns {Boolean} Whether this constructor supports the requested type/subtype
      */
     static supportsGeoJSONType(type, subtype = null){
-        return type.toLowerCase() === 'linestring' && subtype === null;
+        return typeof type === 'string' && type.toLowerCase() === 'linestring' && subtype == null;
     }
 
     /**
@@ -122,12 +122,7 @@ class Linestring extends AnnotationItem{
      * @param {Object} properties - The style properties to set.
      * @description This method sets the style properties of the linestring using the provided properties object.
      */
-    setStyle(properties){
-        Object.assign({},properties);
-        if(properties.rescale){
-            delete properties.rescale['strokeWidth'];
-        }
-        this._paperItem.style.set(properties);
-    }
+    // Use AnnotationItem.setStyle so logical stroke/rescale round-trip for live sync.
 }
+
 export{Linestring};

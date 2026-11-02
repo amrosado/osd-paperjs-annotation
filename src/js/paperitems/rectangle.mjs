@@ -38,6 +38,7 @@
 
 import { AnnotationItem } from "./annotationitem.mjs";
 import { paper } from '../paperjs.mjs';
+import {pathPointsInImage, centerOfPoints} from '../utils/shapeGeometry.mjs';
 
 /**
  * Represents a rectangle annotation item.
@@ -101,7 +102,7 @@ class Rectangle extends AnnotationItem{
      * @returns {Boolean} Whether this constructor supports the requested type/subtype
      */
     static supportsGeoJSONType(type, subtype){
-        return type.toLowerCase() === 'point' && subtype?.toLowerCase() === 'rectangle';
+        return typeof type === 'string' && type.toLowerCase() === 'point' && subtype?.toLowerCase() === 'rectangle';
     }
 
     /**
@@ -121,8 +122,7 @@ class Rectangle extends AnnotationItem{
      * @description This method returns an array containing the x and y coordinates of the rectangle.
      */
     getCoordinates(){
-        let item = this.paperItem;
-        return [item.position.x, item.position.y];
+        return centerOfPoints(pathPointsInImage(this.paperItem.children[0]));
     }
     /**
      * Retrieves the properties of the rectangle.
@@ -136,12 +136,12 @@ class Rectangle extends AnnotationItem{
         if (!path || !path.segments || path.segments.length < 4) {
             return { width: 0, height: 0, angle: 0 };
         }
-        let points = path.segments.map(s=>s.point);
+        let points = pathPointsInImage(path);
         let top = points[1].subtract(points[0]);
         let left = points[0].subtract(points[3]);
         let w = top.length;
         let h = left.length;
-        let angle = top.angleInDegrees;
+        let angle = top.angle;
         return {
             width: w,
             height: h,

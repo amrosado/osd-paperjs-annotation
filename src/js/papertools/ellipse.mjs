@@ -149,6 +149,12 @@ class EllipseTool extends AnnotationUITool{
         }
     }
     onMouseDrag(ev){
+        if (!this.item || !this.item.layer || !this.item.view) {
+            // Item was removed mid-gesture (e.g. live-session replace); abort cleanly.
+            this.mode = null;
+            this.creating = null;
+            return;
+        }
         let currPt;
         let center = this.item.bounds.center;
         if(this.mode=='creating'){

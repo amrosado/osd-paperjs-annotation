@@ -99,7 +99,9 @@ class MultiPolygon extends AnnotationItem{
      * @returns {Boolean} Whether this constructor supports the requested type/subtype
      */
     static supportsGeoJSONType(type, subtype = null){
-        return ['polygon','multipolygon'].includes(type.toLowerCase()) && subtype === null;
+        return typeof type === 'string'
+            && ['polygon','multipolygon'].includes(type.toLowerCase())
+            && subtype == null;
     }
 
     static get paperItemShapeContract() {

@@ -319,8 +319,29 @@ class GeoJSPaperViewport extends OpenSeadragon.EventSource {
         );
     }
 
+    viewportToImageRectangle(rect) {
+        const topLeft = this.viewportToImageCoordinates({ x: rect.x, y: rect.y });
+        const bottomRight = this.viewportToImageCoordinates({
+            x: rect.x + rect.width,
+            y: rect.y + rect.height,
+        });
+        return new OpenSeadragon.Rect(
+            topLeft.x,
+            topLeft.y,
+            bottomRight.x - topLeft.x,
+            bottomRight.y - topLeft.y,
+        );
+    }
+
     imageToViewportZoom(zoom) {
-        return Number(zoom) || this.getZoom();
+        const width = this._containerInnerSize?.x || this.viewer.container.clientWidth || 1;
+        return Number(zoom) * this.imageWidth / width || this.getZoom();
+    }
+
+    viewportToImageZoom(zoom) {
+        const width = this._containerInnerSize?.x || this.viewer.container.clientWidth || 1;
+        // Shared zoom is CSS pixels per image pixel, independent of panel width.
+        return Number(zoom) * width / this.imageWidth;
     }
 
     viewportToViewerElementCoordinates(point) {
@@ -388,11 +409,16 @@ class GeoJSPaperViewport extends OpenSeadragon.EventSource {
         return this;
     }
 
-    getRotation() {
-        return 0;
+    getRotation(current = true) {
+        void current;
+        const degrees = Number(this.viewer?._viewportRotation);
+        return Number.isFinite(degrees) ? degrees : 0;
     }
 
-    rotateTo() {
+    rotateTo(degrees) {
+        const next = Number(degrees);
+        if (!Number.isFinite(next)) return this;
+        this.viewer?._setViewportRotation?.(next);
         return this;
     }
 }
@@ -515,7 +541,8 @@ class GeoJSPaperTiledImage extends OpenSeadragon.EventSource {
     }
 
     getRotation() {
-        return 0;
+        const degrees = Number(this.viewer?._viewportRotation);
+        return Number.isFinite(degrees) ? degrees : 0;
     }
 
     getFlip() {
@@ -561,6 +588,7 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         this._viewportChangeFrame = null;
         this._viewportChangeFrameActive = false;
         this._pendingViewportFinish = false;
+        this._viewportRotation = 0;
 
         this.element = document.getElementById(id);
         if (!this.element) {
@@ -573,6 +601,7 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         this.container.className = 'geojs-tile-viewer-container';
         this.canvas = document.createElement('div');
         this.canvas.className = 'geojs-tile-viewer-canvas';
+        this.canvas.style.transformOrigin = '50% 50%';
         this.geoNode = document.createElement('div');
         this.geoNode.className = 'geojs-tile-layer-node';
         this.buttonGroup = {
@@ -612,8 +641,12 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
 
     createPaperOverlay(options) {
         const overlay = new PaperOverlay(this, options);
+        const pointerEvents = this._mouseNavEnabled ? 'none' : 'auto';
         if (overlay?._canvasdiv) {
-            overlay._canvasdiv.style.pointerEvents = this._mouseNavEnabled ? 'none' : 'auto';
+            overlay._canvasdiv.style.pointerEvents = pointerEvents;
+        }
+        if (overlay?._canvas) {
+            overlay._canvas.style.pointerEvents = pointerEvents;
         }
         return overlay;
     }
@@ -784,9 +817,14 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
 
     setMouseNavEnabled(enabled = true) {
         this._mouseNavEnabled = Boolean(enabled);
+        const pointerEvents = this._mouseNavEnabled ? 'none' : 'auto';
         this.PaperOverlays.forEach((overlay) => {
             if (overlay?._canvasdiv) {
-                overlay._canvasdiv.style.pointerEvents = this._mouseNavEnabled ? 'none' : 'auto';
+                overlay._canvasdiv.style.pointerEvents = pointerEvents;
+            }
+            // pointer-events is not inherited — the canvas must match or it steals zoom/pan.
+            if (overlay?._canvas) {
+                overlay._canvas.style.pointerEvents = pointerEvents;
             }
         });
         return this;
@@ -807,12 +845,62 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         });
     }
 
-    _eventDisplayPoint(event) {
-        const rect = this.geoNode.getBoundingClientRect();
+    _setViewportRotation(degrees) {
+        const next = ((Number(degrees) % 360) + 360) % 360;
+        const previous = Number(this._viewportRotation) || 0;
+        if (Math.abs(previous - next) < 0.001) return this;
+        this._viewportRotation = next;
+        if (this.canvas) {
+            this.canvas.style.transform = next ? `rotate(${next}deg)` : '';
+        }
+        this.raiseEvent('rotate', { degrees: next, pivot: this.viewport?.getCenter?.(true) });
+        this._notifyViewportChanged({ finish: true });
+        return this;
+    }
+
+    _rotationRadians() {
+        return -((Number(this._viewportRotation) || 0) * Math.PI) / 180;
+    }
+
+    /**
+     * Map screen-space motion into the (unrotated) geoMap display axes.
+     * Required because rotation is applied as a CSS transform on the canvas.
+     */
+    _screenDeltaToMapPan(dx, dy) {
+        const rad = this._rotationRadians();
+        if (!rad) return { x: dx, y: dy };
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
         return {
-            x: Number(event.clientX || 0) - rect.left,
-            y: Number(event.clientY || 0) - rect.top,
+            x: dx * cos - dy * sin,
+            y: dx * sin + dy * cos,
         };
+    }
+
+    /**
+     * Convert a window/client point into local canvas coordinates, undoing CSS rotation.
+     * Uses the AABB center (stable under rotate-around-center) and layout clientWidth/Height.
+     */
+    clientToCanvasLocal(eventOrPoint) {
+        const el = this.canvas || this.container || this.geoNode;
+        if (!el) return { x: 0, y: 0 };
+        const width = Number(el.clientWidth || 0);
+        const height = Number(el.clientHeight || 0);
+        const rect = el.getBoundingClientRect?.() || { left: 0, top: 0, width, height };
+        // AABB center == element center when transform-origin is 50% 50%.
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const clientX = Number(eventOrPoint?.clientX ?? eventOrPoint?.x ?? 0);
+        const clientY = Number(eventOrPoint?.clientY ?? eventOrPoint?.y ?? 0);
+        const mapped = this._screenDeltaToMapPan(clientX - cx, clientY - cy);
+        return {
+            x: mapped.x + width / 2,
+            y: mapped.y + height / 2,
+        };
+    }
+
+    _eventDisplayPoint(event) {
+        return this.clientToCanvasLocal(event);
     }
 
     _handleNavigationWheel(event) {
@@ -830,20 +918,121 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         this._scheduleViewportChanged({ finish: true });
     }
 
-    _handleNavigationPointerDown(event) {
-        if (!this._mouseNavEnabled || this._destroyed || event.button !== 0 || event.isPrimary === false) return;
-        this._navigationDrag = {
-            pointerId: event.pointerId,
-            lastX: event.clientX,
-            lastY: event.clientY,
+    _pointerDistance(a, b) {
+        const dx = Number(a.clientX) - Number(b.clientX);
+        const dy = Number(a.clientY) - Number(b.clientY);
+        return Math.hypot(dx, dy);
+    }
+
+    _pointerMidpoint(a, b) {
+        return {
+            clientX: (Number(a.clientX) + Number(b.clientX)) / 2,
+            clientY: (Number(a.clientY) + Number(b.clientY)) / 2,
         };
+    }
+
+    _navigationPointers() {
+        if (!this._navigationPointersMap) this._navigationPointersMap = new Map();
+        return this._navigationPointersMap;
+    }
+
+    _syncNavigationGestureFromPointers() {
+        const pointers = [...this._navigationPointers().values()];
+        if (pointers.length >= 2) {
+            const [a, b] = pointers;
+            const distance = this._pointerDistance(a, b);
+            const mid = this._pointerMidpoint(a, b);
+            this._navigationDrag = null;
+            this._navigationPinch = {
+                lastDistance: distance,
+                lastMidX: mid.clientX,
+                lastMidY: mid.clientY,
+            };
+            return;
+        }
+        this._navigationPinch = null;
+        if (pointers.length === 1) {
+            const only = pointers[0];
+            this._navigationDrag = {
+                pointerId: only.pointerId,
+                lastX: only.clientX,
+                lastY: only.clientY,
+            };
+            return;
+        }
+        this._navigationDrag = null;
+    }
+
+    _handleNavigationPointerDown(event) {
+        if (!this._mouseNavEnabled || this._destroyed) return;
+        // Accept primary mouse button or any touch/pen contact.
+        const isTouchLike = event.pointerType === 'touch' || event.pointerType === 'pen';
+        if (!isTouchLike && event.button !== 0) return;
+
+        const pointers = this._navigationPointers();
+        pointers.set(event.pointerId, {
+            pointerId: event.pointerId,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            pointerType: event.pointerType,
+        });
         this.canvas.setPointerCapture?.(event.pointerId);
+        this._syncNavigationGestureFromPointers();
         consumeNavigationEvent(event);
     }
 
     _handleNavigationPointerMove(event) {
+        if (!this._mouseNavEnabled || this._destroyed) return;
+        const pointers = this._navigationPointers();
+        if (!pointers.has(event.pointerId)) return;
+
+        pointers.set(event.pointerId, {
+            pointerId: event.pointerId,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            pointerType: event.pointerType,
+        });
+
+        if (pointers.size >= 2 && this._navigationPinch) {
+            const [a, b] = [...pointers.values()];
+            const distance = this._pointerDistance(a, b);
+            const mid = this._pointerMidpoint(a, b);
+            const pinch = this._navigationPinch;
+            const lastDistance = Number(pinch.lastDistance) || distance;
+            const scale = lastDistance > 0 ? distance / lastDistance : 1;
+            const dx = mid.clientX - Number(pinch.lastMidX);
+            const dy = mid.clientY - Number(pinch.lastMidY);
+            pinch.lastDistance = distance;
+            pinch.lastMidX = mid.clientX;
+            pinch.lastMidY = mid.clientY;
+
+            consumeNavigationEvent(event);
+
+            if (Number.isFinite(scale) && Math.abs(scale - 1) > 0.001) {
+                const display = this._eventDisplayPoint(mid);
+                const geo = this.geoMap.displayToGcs(display);
+                const currentZoom = Number(this.geoMap.zoom());
+                if (Number.isFinite(currentZoom)) {
+                    // geoJS zoom is roughly log2 scale; convert pinch scale → zoom delta.
+                    const zoomDelta = Math.log2(scale);
+                    if (Number.isFinite(zoomDelta) && zoomDelta !== 0) {
+                        this.geoMap.zoom(currentZoom + zoomDelta, { map: display, geo }, true, false);
+                    }
+                }
+            }
+
+            if (Number.isFinite(dx) && Number.isFinite(dy) && (dx !== 0 || dy !== 0)) {
+                const pan = this._screenDeltaToMapPan(dx, dy);
+                this.geoMap.pan(pan, true, 'limited');
+            }
+
+            this._scheduleDraw();
+            this._scheduleViewportChanged({ finish: false });
+            return;
+        }
+
         const drag = this._navigationDrag;
-        if (!drag || this._destroyed || (drag.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+        if (!drag || drag.pointerId !== event.pointerId) return;
         const dx = Number(event.clientX) - Number(drag.lastX);
         const dy = Number(event.clientY) - Number(drag.lastY);
         drag.lastX = event.clientX;
@@ -851,27 +1040,34 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         if (!Number.isFinite(dx) || !Number.isFinite(dy) || (dx === 0 && dy === 0)) return;
 
         consumeNavigationEvent(event);
-        this.geoMap.pan({ x: dx, y: dy }, true, 'limited');
+        const pan = this._screenDeltaToMapPan(dx, dy);
+        this.geoMap.pan(pan, true, 'limited');
         this._scheduleDraw();
         this._scheduleViewportChanged({ finish: false });
     }
 
     _handleNavigationPointerUp(event) {
-        const drag = this._navigationDrag;
-        if (!drag || (drag.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
+        const pointers = this._navigationPointers();
+        if (!pointers.has(event.pointerId)) return;
+        pointers.delete(event.pointerId);
         this.canvas.releasePointerCapture?.(event.pointerId);
-        this._navigationDrag = null;
+        this._syncNavigationGestureFromPointers();
         consumeNavigationEvent(event);
-        this._notifyViewportChanged({ finish: true });
+        if (pointers.size === 0) {
+            this._notifyViewportChanged({ finish: true });
+        }
     }
 
     _bindNavigationFallback() {
+        this._navigationPointersMap = new Map();
+        this._navigationPinch = null;
         this._navigationHandlers = [
             { element: this.canvas, name: 'wheel', handler: (event) => this._handleNavigationWheel(event), options: { capture: true, passive: false } },
             { element: this.canvas, name: 'pointerdown', handler: (event) => this._handleNavigationPointerDown(event), options: { capture: true } },
             { element: this.canvas, name: 'pointermove', handler: (event) => this._handleNavigationPointerMove(event), options: { capture: true } },
             { element: this.canvas, name: 'pointerup', handler: (event) => this._handleNavigationPointerUp(event), options: { capture: true } },
             { element: this.canvas, name: 'pointercancel', handler: (event) => this._handleNavigationPointerUp(event), options: { capture: true } },
+            { element: this.canvas, name: 'lostpointercapture', handler: (event) => this._handleNavigationPointerUp(event), options: { capture: true } },
         ];
         this._navigationHandlers.forEach(({ element, name, handler, options }) => {
             element.addEventListener(name, handler, options);
@@ -884,6 +1080,8 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         });
         this._navigationHandlers = [];
         this._navigationDrag = null;
+        this._navigationPinch = null;
+        this._navigationPointersMap?.clear();
     }
 
     _notifyViewportChanged({ finish = true } = {}) {
@@ -901,11 +1099,42 @@ class GeoJSPaperViewer extends OpenSeadragon.EventSource {
         if (this._destroyed) return;
         const width = Math.max(1, this.container.clientWidth || this.element.clientWidth || 1);
         const height = Math.max(1, this.container.clientHeight || this.element.clientHeight || 1);
+        // geoMap.size() keeps GeoJS camera zoom, which changes visible image bounds
+        // (and therefore our getZoom = imageWidth/visibleWidth) when the aspect/size
+        // changes. Snapshot image-space center/zoom and restore after the size update
+        // so sidebar chrome toggles do not drift live-session sync.
+        let preservedCenter = null;
+        let preservedZoom = null;
+        if (this._initialSizeApplied && this.viewport) {
+            try {
+                const center = this.viewport.getCenter(true);
+                const zoom = this.viewport.getZoom(true);
+                if (center && Number.isFinite(zoom) && zoom > 0) {
+                    preservedCenter = center;
+                    preservedZoom = zoom;
+                }
+            } catch {
+                preservedCenter = null;
+                preservedZoom = null;
+            }
+        }
         this.geoMap.size({ width, height });
         this.viewport.refreshSize();
         if (!this._initialSizeApplied) {
             this._initialSizeApplied = true;
             this.viewport.goHome();
+        } else if (preservedCenter && preservedZoom) {
+            const imageCenter = this.viewport._imagePointFromViewport(preservedCenter);
+            const visibleWidth = this.viewport.imageWidth / preservedZoom;
+            const aspect = height / Math.max(width, 1);
+            const visibleHeight = visibleWidth * aspect;
+            this.geoMap.bounds({
+                left: imageCenter.x - visibleWidth / 2,
+                top: imageCenter.y - visibleHeight / 2,
+                right: imageCenter.x + visibleWidth / 2,
+                bottom: imageCenter.y + visibleHeight / 2,
+            });
+            this._captureCurrentViewportState();
         }
         this.raiseEvent('resize', { width, height });
         this.raiseEvent('reset-size', { width, height });

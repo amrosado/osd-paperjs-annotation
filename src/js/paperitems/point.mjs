@@ -37,7 +37,6 @@
  */
 
 import { AnnotationItem } from "./annotationitem.mjs";
-import { OpenSeadragon } from '../osd-loader.mjs';
 import { paper } from '../paperjs.mjs';
 // import { makeFaIcon } from "../utils/faIcon.mjs";
 
@@ -62,35 +61,47 @@ class Point extends AnnotationItem{
         if (geoJSON.geometry.type !== 'Point') {
             error('Bad geoJSON object: type !=="Point"');
         }
-        let radius = 6.0;
-        let coords = geoJSON.geometry.coordinates.slice(0, 2);
+        const requestedRadius = Number(geoJSON?.properties?.radius);
+        const radius = Number.isFinite(requestedRadius) && requestedRadius > 0 ? requestedRadius : 9;
+        const coords = geoJSON.geometry.coordinates.slice(0, 2);
+        // Prefer logical rescale strokeWidth; top-level strokeWidth may be a post-rescale screen value.
+        const logicalStroke = Number(
+            geoJSON?.properties?.rescale?.strokeWidth ?? geoJSON?.properties?.strokeWidth,
+        );
         
         let point = new paper.Group();
-        point.pivot = new paper.Point(0,0);
+        point.pivot = new paper.Point(0, 0);
         point.applyMatrix = true;
-        
-        let circle = new paper.Path.Circle(new paper.Point(0, 0), radius);
-        circle.scale(new paper.Point(1, 0.5), new paper.Point(0, 0));
-    
-        point.addChild(circle);
 
-        let stem = new paper.Path.Line(new paper.Point(0, 0), new paper.Point(0, -radius));
-        point.addChild(stem);
-        
-        let ball = new paper.Path.Circle(new paper.Point(0, -radius*1.5), radius/2);
-        point.addChild(ball);
-        
+        let circle = new paper.Path.Circle(new paper.Point(0, 0), radius);
+        point.addChild(circle);
         point.position = new paper.Point(...coords);
-        point.scaleFactor = point.project._scope.scaleByCurrentZoom(1);
-        point.scale(point.scaleFactor, circle.bounds.center);
-       
+
+        let appliedChildScale = 1;
+        point.scaleFactor = 1;
         point.rescale = point.rescale || {};
-    
-        point.rescale.size = function (z) {
-            point.scale(1 / (point.scaleFactor * z));
-            point.scaleFactor = 1 / z;
+        point.rescale.strokeWidth = Number.isFinite(logicalStroke) && logicalStroke > 0 ? logicalStroke : 1.75;
+        point.data = point.data || {};
+        point.data.pointRadius = radius;
+        // Keep marker radius in CSS/screen pixels (same contract as GeoJS point
+        // features) so live-session peers match even when sidebar width differs.
+        point.rescale.size = function (zoomFactor) {
+            let sx = Math.abs(Number(zoomFactor));
+            try {
+                // Prefer the real item→view scale after container/layout changes.
+                const scaling = point.viewMatrix?.scaling;
+                const fromMatrix = Math.abs(Number(scaling?.x));
+                if (Number.isFinite(fromMatrix) && fromMatrix > 0) sx = fromMatrix;
+            } catch {
+                // Fall back to the zoomFactor passed by applyRescale.
+            }
+            if (!Number.isFinite(sx) || sx === 0) return;
+            const next = 1 / sx;
+            circle.scale(next / appliedChildScale);
+            appliedChildScale = next;
+            point.scaleFactor = next;
         };
-        
+
         point.applyRescale();
 
         
@@ -103,12 +114,37 @@ class Point extends AnnotationItem{
      * @description This method sets the style properties of the point using the provided properties object.
      */
     setStyle(props){
-        //override default implementation so it doesn't overwrite the rescale properties
-        // let rescale = props.rescale;
-        // delete props.rescale;
-        props.rescale = OpenSeadragon.extend(true, props.rescale, this.paperItem.rescale);
-        this.paperItem.style.set(props);
-        // this.paperItem.children[0].style.set(props);
+        // Keep runtime rescale.size; never feed functions into Paper style.set.
+        const incoming = props && typeof props === 'object' ? {...props} : {};
+        const requestedRadius = Number(incoming.radius);
+        if (Number.isFinite(requestedRadius) && requestedRadius > 0) {
+            this.paperItem.data = this.paperItem.data || {};
+            this.paperItem.data.pointRadius = requestedRadius;
+        }
+        const logicalStroke = Number(incoming.rescale?.strokeWidth ?? incoming.strokeWidth);
+        this.paperItem.rescale = this.paperItem.rescale || {};
+        if (Number.isFinite(logicalStroke) && logicalStroke > 0) {
+            this.paperItem.rescale.strokeWidth = logicalStroke;
+            incoming.strokeWidth = logicalStroke;
+        }
+        delete incoming.rescale;
+        delete incoming.radius;
+        delete incoming.marker;
+        delete incoming.userdata;
+        delete incoming.session_layer;
+        delete incoming.label;
+        delete incoming.selected;
+        this.paperItem.style.set(incoming);
+        const circle = this.paperItem.children?.[0] || this.paperItem;
+        const opacity = incoming.fillOpacity == null ? 0 : Number(incoming.fillOpacity);
+        if (circle.fillColor && Number.isFinite(opacity)) {
+            circle.fillColor.alpha = Math.min(1, Math.max(0, opacity));
+        }
+        if (!(Number.isFinite(opacity) && opacity > 0)) {
+            circle.fillColor = null;
+            if (this.paperItem.fillOpacity != null) this.paperItem.fillOpacity = 0;
+        }
+        this.paperItem.applyRescale?.();
     }
     
     /**
@@ -119,7 +155,7 @@ class Point extends AnnotationItem{
      * @returns {Boolean} Whether this constructor supports the requested type/subtype
      */
     static supportsGeoJSONType(type, subtype=null){
-        return type.toLowerCase() === 'point' && subtype === null;
+        return typeof type === 'string' && type.toLowerCase() === 'point' && subtype == null;
     }
 
     /**
@@ -139,8 +175,9 @@ class Point extends AnnotationItem{
      * @description This method returns an array of coordinates representing the position of the point.
      */
     getCoordinates(){
-        let item = this.paperItem;
-        let circle = item.children[0];
+        const position = this.paperItem?.position;
+        if (position) return [position.x, position.y];
+        const circle = this.paperItem?.children?.[0];
         return [circle.bounds.center.x, circle.bounds.center.y];
     }
     /**
@@ -150,13 +187,27 @@ class Point extends AnnotationItem{
      * serializable rescale from the group (e.g. strokeWidth) so both colors and logical stroke width round-trip.
      */
     getStyleProperties(){
-        const circleStyle = this.paperItem.children[0].style.toJSON();
+        const circle = this.paperItem.children[0];
+        const circleStyle = circle.style.toJSON();
         const rescale = this.paperItem.rescale;
-        const rescaleExport = {};
-        if (rescale && typeof rescale.strokeWidth === 'number') {
-            rescaleExport.strokeWidth = rescale.strokeWidth;
-        }
-        return Object.keys(rescaleExport).length ? { ...circleStyle, rescale: rescaleExport } : circleStyle;
+        const logicalStroke = typeof rescale?.strokeWidth === 'number' && rescale.strokeWidth > 0
+            ? rescale.strokeWidth
+            : 1.75;
+        const radius = Number(
+            this.paperItem.data?.pointRadius
+            ?? (circle.segments ? Math.hypot(circle.segments[0].point.x, circle.segments[0].point.y) : null)
+            ?? 9,
+        );
+        const logicalRadius = Number.isFinite(radius) && radius > 0 ? radius : 9;
+        // Export logical size/stroke, not the post-applyRescale visual strokeWidth.
+        // marker:'circle' keeps GeoJS on the same radius/stroke path as SavedAnnotations.
+        return {
+            ...circleStyle,
+            marker: 'circle',
+            radius: logicalRadius,
+            strokeWidth: logicalStroke,
+            rescale: {strokeWidth: logicalStroke},
+        };
     }
     /**
      * Perform actions during a transformation on the point.

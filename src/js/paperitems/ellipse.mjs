@@ -38,6 +38,7 @@
 
 import { AnnotationItem } from "./annotationitem.mjs";
 import { paper } from '../paperjs.mjs';
+import {pathPointsInImage, centerOfPoints, ellipseAxesFromPoints} from '../utils/shapeGeometry.mjs';
 
 /**
  * Represents an ellipse annotation item.
@@ -98,7 +99,7 @@ class Ellipse extends AnnotationItem{
      * @returns {Boolean} Whether this constructor supports the requested type/subtype
      */
     static supportsGeoJSONType(type, subtype){
-        return type.toLowerCase() === 'point' && subtype?.toLowerCase() === 'ellipse';
+        return typeof type === 'string' && type.toLowerCase() === 'point' && subtype?.toLowerCase() === 'ellipse';
     }
 
     /**
@@ -119,8 +120,7 @@ class Ellipse extends AnnotationItem{
      * @description This method returns an array of coordinates representing the position of the center of the ellipse.
      */
     getCoordinates(){
-        let item = this.paperItem;
-        return [item.position.x, item.position.y];
+        return centerOfPoints(pathPointsInImage(this.paperItem.children[0]));
     }
     
     /**
@@ -136,24 +136,7 @@ class Ellipse extends AnnotationItem{
         if (!path || !path.segments || path.segments.length < 4) {
             return { majorRadius: 0, minorRadius: 0, angle: 0 };
         }
-        let points = path.segments.map(s=>s.point);
-        let ax1 = points[2].subtract(points[0]);
-        let ax2 = points[3].subtract(points[1]);
-        let a, b;
-        if(ax1.length > ax2.length){
-            a = ax1;
-            b = ax2;
-        } else {
-            a = ax2;
-            b = ax1;
-        }
-
-        let angle = a.angle;
-        return {
-            majorRadius: a.length/2,
-            minorRadius: b.length/2,
-            angle: angle
-        };
+        return ellipseAxesFromPoints(pathPointsInImage(path));
     }
     /**
      * Handle transformation operations on the ellipse item.

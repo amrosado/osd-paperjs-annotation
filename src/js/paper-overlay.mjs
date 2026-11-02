@@ -88,12 +88,16 @@ class PaperOverlay extends OpenSeadragon.EventSource{
         this._canvasdiv.style.position = 'absolute';
         this._canvasdiv.style.left = "0px";
         this._canvasdiv.style.top = "0px";
+        this._canvasdiv.style.right = "0px";
+        this._canvasdiv.style.bottom = "0px";
         this._canvasdiv.style.width = '100%';
         this._canvasdiv.style.height = '100%';
-        this._canvasdiv.style.zIndex = PAPER_OVERLAY_Z_INDEX;
+        // Above GeoJS feature layers so strokes stay visible on mobile.
+        this._canvasdiv.style.zIndex = '200';
 
         this._canvas = document.createElement('canvas');
         this._canvas.setAttribute('id', this._id);
+        this._canvas.style.display = 'block';
         this._canvasdiv.appendChild(this._canvas);
         
         viewer.canvas.appendChild(this._canvasdiv);
@@ -108,6 +112,10 @@ class PaperOverlay extends OpenSeadragon.EventSource{
         this.paperScope.project.overlay = this;
         this.ps = ps;
         this._paperProject=ps.project;
+
+        // GeoJS applies slide rotation as CSS on viewer.canvas (parent of this overlay).
+        // Paper.js event offsets ignore that transform — remap client → local canvas coords.
+        this._installRotatedEventPointMapping();
 
         this._resize();
         
@@ -200,17 +208,19 @@ class PaperOverlay extends OpenSeadragon.EventSource{
      * The scale factor for the overlay. Equal to the pixel width of the viewer's drawing canvas
      */
     get scaleFactor(){
-        const width = this._getCanvasDisplayWidth();
-        if (Number.isFinite(width) && width > 0) {
-            this._currentScaleFactor = width;
-        }
+        // Reading a new DOM width must not consume the resize notification.
+        // _resize updates this value together with every image-layer matrix.
         return this._currentScaleFactor || 1;
     }
 
     _getCanvasDisplayWidth(){
+        // Prefer the viewer container: for GeoJS, drawer.canvas is the geoNode div and
+        // can briefly report 0 during sidebar transitions, which breaks Paper scale.
+        const containerWidth = Number(this.viewer?.container?.clientWidth) || 0;
+        if (containerWidth > 0) return containerWidth;
         const canvas = this.viewer?.drawer?.canvas;
         const pixelRatio = OpenSeadragon.pixelDensityRatio || window.devicePixelRatio || 1;
-        return canvas?.clientWidth || (canvas?.width ? canvas.width / pixelRatio : 0) || this.viewer?.container?.clientWidth || 0;
+        return canvas?.clientWidth || (canvas?.width ? canvas.width / pixelRatio : 0) || 0;
     }
   /**
    * Adds a button to the viewer. The button is created with the provided parameters.
@@ -409,6 +419,33 @@ class PaperOverlay extends OpenSeadragon.EventSource{
             _this.rescaleItems();
         }
     }
+
+    /**
+     * When GeoJS CSS-rotates the shared canvas, remaps Paper mouse/touch points so
+     * crosshairs and drawing tools stay under the cursor.
+     * @private
+     */
+    _installRotatedEventPointMapping() {
+        const view = this.paperScope?.view;
+        const viewer = this.viewer;
+        if (!view || typeof view.getEventPoint !== 'function') return;
+
+        const originalGetEventPoint = view.getEventPoint.bind(view);
+        view.getEventPoint = (event) => {
+            const degrees = Number(viewer?._viewportRotation);
+            if (
+                viewer?.isGeoJSTileViewer
+                && Number.isFinite(degrees)
+                && Math.abs(degrees) > 0.001
+                && typeof viewer.clientToCanvasLocal === 'function'
+            ) {
+                const native = event?.event || event?.originalEvent || event;
+                const local = viewer.clientToCanvasLocal(native);
+                return view.viewToProject(new paper.Point(local.x, local.y));
+            }
+            return originalGetEventPoint(event);
+        };
+    }
     //-----------
   /**
    * Rescales all items in the overlay according to the current zoom level of the viewer.
@@ -440,18 +477,33 @@ class PaperOverlay extends OpenSeadragon.EventSource{
      * @param {number} h - The height of the image data.
      * @returns {ImageData} The image data.
      */
-    getImageData(x, y, w, h){
-        x = x || 0;
-        y = y || 0;
-        w = w == undefined ? this.viewer.drawer.canvas.width : w;
-        h = h == undefined ? this.viewer.drawer.canvas.height : h;
-        
-        // deal with flipping the x coordinate if needed
-        if(this.ps.view.getFlipped()){
-            x = this.viewer.drawer.canvas.width - x - w;
+    getViewerImageCanvas(){
+        const canvas = document.createElement('canvas');
+        canvas.width = this._canvas.width; canvas.height = this._canvas.height;
+        const context = canvas.getContext('2d', {willReadFrequently: true});
+        const images = this.viewer.isGeoJSTileViewer ? this.viewer.world._items : [];
+        const sources = images.length ? images.map(image => {
+            const renderer = image.layer?.renderer?.();
+            renderer?._renderFrame?.();
+            const source = renderer?.canvas?.();
+            return {canvas: source?.[0] || source, opacity: image.layer?.opacity?.() ?? 1};
+        }) : [{canvas: this.viewer.drawer?.canvas, opacity: 1}];
+        const copied = new Set();
+        for (const source of sources) {
+            if (source.canvas?.tagName !== 'CANVAS') continue;
+            if (copied.has(source.canvas)) continue;
+            copied.add(source.canvas);
+            context.globalAlpha = this.viewer.isGeoJSTileViewer ? 1 : source.opacity;
+            // Reading via a 2D copy also supports WebGL drawers and keeps the
+            // source image separate from annotation and preview canvases.
+            context.drawImage(source.canvas, 0, 0, canvas.width, canvas.height);
         }
-        
-        return this.viewer.drawer.canvas.getContext('2d',{willReadFrequently:true}).getImageData(x, y, w, h);
+        return canvas;
+    }
+
+    getImageData(x = 0, y = 0, w, h){
+        const canvas = this.getViewerImageCanvas();
+        return canvas.getContext('2d').getImageData(x, y, w ?? canvas.width, h ?? canvas.height);
     }
 
     /**
@@ -466,17 +518,17 @@ class PaperOverlay extends OpenSeadragon.EventSource{
         //TO DO: make this query subregions of the viewport directly instead of always returning the entire thing
        
         let center = view.viewToProject(new paper.Point(view.viewSize.width/2, view.viewSize.height/2 ));
-        let rotation = -1 * this.viewer.viewport.getRotation();
+        let rotation = -view.getRotation();
         let rasterDef = {
             insert:false,
         }
-        if(withImageData) rasterDef.canvas = this.viewer.drawer.canvas;
-        else rasterDef.size = new paper.Size(this.viewer.drawer.canvas.width,this.viewer.drawer.canvas.height);
+        if(withImageData) rasterDef.canvas = this.getViewerImageCanvas();
+        else rasterDef.size = new paper.Size(this._canvas.width, this._canvas.height);
         let raster = new paper.Raster(rasterDef);
 
         raster.position = center;
         raster.rotate(rotation);
-        let scaleFactor = view.viewSize.width / view.getZoom() / this.viewer.drawer.canvas.width;
+        let scaleFactor = view.viewSize.width / view.getZoom() / this._canvas.width;
         raster.scale(scaleFactor);
         
         if(view.getFlipped()){
@@ -544,6 +596,65 @@ class PaperOverlay extends OpenSeadragon.EventSource{
             this.paperScope.view.update();
         }
     }
+    _updatePaperViewFromGeoMap() {
+        const map = this.viewer?.geoMap;
+        const bounds = this.viewer?._geoBoundsForViewport?.(true);
+        const imageWidth = Number(this.viewer?.viewport?.imageWidth);
+        const scaleFactor = this.scaleFactor;
+        if (!map?.gcsToDisplay || !bounds || !Number.isFinite(imageWidth) || imageWidth <= 0 || !Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+            return false;
+        }
+
+        const layoutWidth = Number(bounds.right) - Number(bounds.left);
+        const centerLayout = {
+            x: (Number(bounds.left) + Number(bounds.right)) / 2,
+            y: (Number(bounds.top) + Number(bounds.bottom)) / 2,
+        };
+        if (!Number.isFinite(layoutWidth) || layoutWidth === 0 || !Number.isFinite(centerLayout.x) || !Number.isFinite(centerLayout.y)) {
+            return false;
+        }
+
+        const displayCenter = map.gcsToDisplay(centerLayout);
+        const displayRight = map.gcsToDisplay({ x: Number(bounds.right), y: centerLayout.y });
+        if (!Number.isFinite(displayCenter?.x) || !Number.isFinite(displayCenter?.y) || !Number.isFinite(displayRight?.x)) {
+            return false;
+        }
+
+        // Paper overlay and geoNode are siblings filling the same (possibly CSS-rotated)
+        // parent. getBoundingClientRect AABBs diverge under rotation and mis-place strokes;
+        // map display pixels already match the paper canvas coordinate frame.
+        const screenCenter = {
+            x: displayCenter.x,
+            y: displayCenter.y,
+        };
+        // Center→right covers half the image bounds, not their full width.
+        const displayWidth = 2 * (displayRight.x - displayCenter.x);
+        if (!Number.isFinite(displayWidth) || displayWidth === 0) return false;
+
+        const viewZoom = (displayWidth * imageWidth) / (layoutWidth * scaleFactor);
+        if (!Number.isFinite(viewZoom) || viewZoom === 0) return false;
+
+        const oldZoom = this.paperScope.view.getZoom();
+        this.paperScope.view.setZoom(viewZoom);
+        const viewSize = this.paperScope.view.viewSize;
+        const projectCenter = new paper.Point(
+            centerLayout.x * scaleFactor / imageWidth,
+            centerLayout.y * scaleFactor / imageWidth,
+        );
+        this.paperScope.view.center = projectCenter.subtract(new paper.Point(
+            (screenCenter.x - viewSize.width / 2) / viewZoom,
+            (screenCenter.y - viewSize.height / 2) / viewZoom,
+        ));
+        this.paperScope.view.setRotation(0);
+
+        const newZoom = this.paperScope.view.getZoom();
+        if (Math.abs(newZoom - oldZoom) > 0.0000001) {
+            this.paperScope.view.emit('zoom-changed', { zoom: newZoom });
+        }
+        this.paperScope.view.update();
+        return true;
+    }
+
   /**
    * Updates the Paper.js view to match the zoom and center of the OpenSeadragon viewer.
    * This method synchronizes the Paper.js view with the current zoom and center of the OpenSeadragon viewer.
@@ -552,6 +663,12 @@ class PaperOverlay extends OpenSeadragon.EventSource{
    */
     _updatePaperView() {
         if(this.overlayType === 'viewer'){
+            return;
+        }
+
+        this._resize();
+
+        if (this.viewer?.isGeoJSTileViewer && this._updatePaperViewFromGeoMap()) {
             return;
         }
 
@@ -572,7 +689,9 @@ class PaperOverlay extends OpenSeadragon.EventSource{
         this.viewer.drawer.canvas.pixelRatio = window.devicePixelRatio;
         this.paperScope.view.center = new paper.Point(center.x, center.y).multiply(scaleFactor);
 
-        let degrees = this.viewer.viewport.getRotation(true);
+        // GeoJS applies viewport rotation as a CSS transform on the shared canvas
+        // (tiles + paper). Applying paper rotation again would double-rotate overlays.
+        let degrees = this.viewer.isGeoJSTileViewer ? 0 : this.viewer.viewport.getRotation(true);
         let pivot = this._getPivot();
         this.paperScope.view.setRotation(degrees, pivot);
         

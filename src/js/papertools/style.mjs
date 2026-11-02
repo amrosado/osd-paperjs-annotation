@@ -38,8 +38,8 @@
 
 import {AnnotationUITool, AnnotationUIToolbarBase} from './annotationUITool.mjs';
 import { paper } from '../paperjs.mjs';
-import { isVisible } from '../utils/isvisible.mjs';
 import { convertFaIcons, makeFaIcon } from '../utils/faIcon.mjs';
+import { normalizePointTextStyle, pointTextStyleControlsHTML } from '../utils/pointTextStyle.mjs';
 
 /**
  * Represents a tool for modifying the visual styles of annotation items, including color and opacity.
@@ -145,7 +145,8 @@ import { convertFaIcons, makeFaIcon } from '../utils/faIcon.mjs';
         if(this._targetItems.length==0) this._targetItems=[this.defaultTarget];
     }
     get targetItemStyles(){
-        return this._targetItems.map(item=>item.defaultStyle || item.style);
+        return this._targetItems.map(item=>item.annotationItem?.subtype === 'PointText'
+            ? item.annotationItem.circle.style : (item.defaultStyle || item.style));
     }
     get targetDescription(){
         if(this._targetItems.length==0){
@@ -242,6 +243,13 @@ import { convertFaIcons, makeFaIcon } from '../utils/faIcon.mjs';
         this._emitStyleApplied();
     }
 
+    applyTextStyle(properties){
+        this.targetItems.forEach(item => {
+            if (item.annotationItem?.subtype === 'PointText') item.annotationItem.setStyle(properties);
+        });
+        this._emitStyleApplied();
+    }
+
      /**
      * Apply the given opacity value to fill or stroke properties of the target items.
      * @param {number} opacity - The opacity value to apply.
@@ -277,12 +285,13 @@ import { convertFaIcons, makeFaIcon } from '../utils/faIcon.mjs';
      * @param {paper.Item} item - The specific item to apply the color to (optional).
      */
     applyFillColor(value,item){
+        // Fill is disabled for store/sync: force transparent stroke-only geometry.
         (item?[item]:this.targetItems).forEach(item=>{
-            let color = new paper.Color(value);
             let style = item.defaultStyle || item.style;
-            style.fillColor = color;
-            
+            style.fillColor = null;
+            style.fillOpacity = 0;
             if(item.isGeoJSONFeature){
+                item.fillOpacity = 0;
                 item.updateFillOpacity();
             }
         });
@@ -310,6 +319,7 @@ import { convertFaIcons, makeFaIcon } from '../utils/faIcon.mjs';
     _emitStyleApplied(){
         this.targetItems.forEach(it=>{
             const item = it.isGeoJSONFeature ? it : (it.parent && it.parent.isGeoJSONFeature ? it.parent : it);
+            item.annotationItem?.applyScreenStyle?.();
             if (item && this.emitItemEvent) this.emitItemEvent('item-updated', { item, tool: this });
         });
     }
@@ -344,13 +354,14 @@ class StyleToolbar extends AnnotationUIToolbarBase{
         this.dropdown.querySelectorAll('[data-action="pick-color"]').forEach(e=>{
             e.addEventListener('click',function(){
                 let type = this.getAttribute('data-type');
-                let colorinput = self.dropdown.querySelector(`input[type="color"][data-type="${type}"]`);
+                if (type === 'fill') return;
+                let colorinput = self.dropdown.querySelector(`.colorselect-host[data-type="${type}"], input[type="color"][data-type="${type}"]`);
                 self.dropdown.querySelectorAll('[data-action="pick-color"]').forEach(e=> e.classList.remove('active'));
-                const wasOpen = isVisible(colorinput);
-                if(isVisible(colorinput)){
+                const wasOpen = colorinput && !colorinput.closest('.colorpicker-row')?.classList.contains('hidden');
+                if(wasOpen){
                     self.dropdown.querySelectorAll('.colorpicker-row').forEach(e=>e.classList.add('hidden'));
                 }
-                else{
+                else if (colorinput){
                     self.dropdown.querySelectorAll('.colorpicker-row').forEach(e=>e.classList.add('hidden'));
                     colorinput.closest('.colorpicker-row').classList.remove('hidden');
                     this.classList.add('active');
@@ -362,24 +373,35 @@ class StyleToolbar extends AnnotationUIToolbarBase{
 
         this.dropdown.querySelectorAll('input[type="color"]').forEach(e=>e.addEventListener('input',function(){
             let type = this.getAttribute('data-type');
+            if (type === 'fill') return;
             self.tool.applyColor(this.value,type);
-            type=='fill' && self.setFillButtonColor(new paper.Color(this.value))
             type=='stroke' && self.setStrokeButtonColor(new paper.Color(this.value))
             const tk = self.tool?.project?.paperScope?.annotationToolkit;
             if (tk && tk._emitIntegrationEvent) tk._emitIntegrationEvent('style-color-changed', { type, value: this.value }, { tool: self.tool });
         }));
 
-        this.dropdown.querySelectorAll('input[type="number"]').forEach(e=>e.addEventListener('input',function(){
+        this.dropdown.querySelectorAll('[data-action="stroke-width"]').forEach(e=>e.addEventListener('input',function(){
             self.tool.applyStrokeWidth(this.value);
             const tk = self.tool?.project?.paperScope?.annotationToolkit;
             if (tk && tk._emitIntegrationEvent) tk._emitIntegrationEvent('style-stroke-width-changed', { strokeWidth: Number(this.value) }, { tool: self.tool });
         }));
 
+        this.dropdown.querySelector('[data-action="text-size"]').addEventListener('input', event => {
+            if (event.target.value && event.target.validity.valid) self.tool.applyTextStyle({fontSize: Number(event.target.value)});
+        });
+        this.dropdown.querySelector('[data-action="text-font"]').addEventListener('change', event => {
+            self.tool.applyTextStyle({fontFamily: event.target.value});
+        });
+
         this.dropdown.querySelectorAll('input[data-action="opacity"]').forEach(e=>e.addEventListener('input',function(){
             let type = this.getAttribute('data-type');
             let prop = this.getAttribute('data-property');
+            if (type === 'fill' || prop === 'fillOpacity') {
+                self.tool.applyOpacity(0, 'fillOpacity');
+                self.setFillButtonOpacity(0);
+                return;
+            }
             self.tool.applyOpacity(this.value,prop);
-            type=='fill' && self.setFillButtonOpacity(this.value);
             type=='stroke' && self.setStrokeButtonOpacity(this.value);
             const tk = self.tool?.project?.paperScope?.annotationToolkit;
             if (tk && tk._emitIntegrationEvent) tk._emitIntegrationEvent('style-opacity-changed', { type, property: prop, value: Number(this.value) }, { tool: self.tool });
@@ -389,10 +411,10 @@ class StyleToolbar extends AnnotationUIToolbarBase{
             const tk = self.tool?.project?.paperScope?.annotationToolkit;
             if (tk && tk._emitIntegrationEvent) tk._emitIntegrationEvent('style-pick-from-image-clicked', {}, { tool: self.tool });
             self.tool.pickColor().then((color)=>{
-                this.parentElement.querySelectorAll('input[type="color"]').forEach(e=>{
-                    e.value = color.toCSS(true);
-                    e.dispatchEvent(new Event('input'));
-                });
+                const hex = color.toCSS(true);
+                self.tool.applyStrokeColor(hex);
+                self.setStrokeButtonColor(color);
+                if (tk && tk._emitIntegrationEvent) tk._emitIntegrationEvent('style-color-changed', { type: 'stroke', value: hex }, { tool: self.tool });
             }).catch(error=>{});
         }));
 
@@ -461,6 +483,11 @@ class StyleToolbar extends AnnotationUIToolbarBase{
      */
     fromAverage(type){
         let self=this;
+        if (type === 'fill') {
+            this.tool.applyFillColor(null);
+            this.updateDisplay();
+            return;
+        }
         let promises = this.tool.targetItems.map(item=>{
             return getAverageColor(item).then( (color)=> {
                 self.tool.applyColor(color,type,item);
@@ -486,18 +513,12 @@ class StyleToolbar extends AnnotationUIToolbarBase{
             <div class="style-toolbar">
                 <div class="flex-row style-row annotation-ui-buttonbar" >
                     <span><span class="hierarchy-up fa-solid fa-sitemap" title='Cycle through hierarchy'></span><span class='style-item' title='Toggle selection'></span></span>
-                    <span class='btn' data-action="pick-color" data-type="fill"><span class="preview"><span class="color bg"></span><span class="color text">Fill</span></span></span>
                     <span class='btn' data-action="pick-color" data-type="stroke"><span class="preview"><span class="color bg"></span><span class="color text">Stroke</span></span></span>
-                    <input type="number" min=0 value=1>
+                    <input type="number" min=0 value=1 data-action="stroke-width" aria-label="Stroke width (screen px)">
                 </div>
+                ${pointTextStyleControlsHTML()}
                 <div class="colorpicker-row hidden">
-                    <input type="color" data-action="color" data-type="fill">
-                    <input type="range" data-action="opacity" data-type="fill" data-property="fillOpacity" min=0 max=1 step=0.01 value=1>
-                    <span class='btn' data-action="from-image">From image</span>
-                    <span class='btn' data-action="from-average" data-type="fill">Area average</span>
-                </div>
-                <div class="colorpicker-row hidden">
-                    <input type="color" data-action="color" data-type="stroke">
+                    <div class="colorselect-host" data-type="stroke" data-stroke-color="#000000"></div>
                     <input type="range" data-action="opacity" data-type="stroke" data-property="strokeOpacity" min=0 max=1 step=0.01 value=1>
                     <span class='btn' data-action="from-image">From image</span>
                     <span class='btn' data-action="from-average" data-type="stroke">Area average</span>
@@ -522,11 +543,21 @@ class StyleToolbar extends AnnotationUIToolbarBase{
     updateDisplay(){
         this._hierarchy = [];
         let targets = this.tool.targetItemStyles;
+        const textItems = this.tool.targetItems.filter(item => item.annotationItem?.subtype === 'PointText');
+        const textControls = this.dropdown.querySelector('.point-text-style-controls');
+        textControls.hidden = textItems.length === 0;
+        textControls.style.display = textItems.length ? '' : 'none';
+        const styles = textItems.map(item => normalizePointTextStyle(item.data.pointTextStyle));
+        for (const [action, property] of [['text-size', 'fontSize'], ['text-font', 'fontFamily']]) {
+            const values = styles.map(style => style[property]);
+            const control = textControls.querySelector(`[data-action="${action}"]`);
+            control.value = new Set(values).size === 1 ? values[0] : '';
+        }
         
         this.updateTargetDescription();
 
         let fillColor = targets.map(item=>item.fillColor);
-        if(fillColor.length==1 || new Set(fillColor.map(c=>c.toCSS())).size == 1){
+        if(fillColor.length==1 || new Set(fillColor.map(c=>c?.toCSS())).size == 1){
             this.setFillButtonColor(fillColor[0])
         }
         else{
@@ -534,7 +565,7 @@ class StyleToolbar extends AnnotationUIToolbarBase{
         }
         
         let strokeColor = targets.map(item=>item.strokeColor);
-        if(strokeColor.length==1 || new Set(strokeColor.map(c=>c.toCSS())).size == 1){
+        if(strokeColor.length==1 || new Set(strokeColor.map(c=>c?.toCSS())).size == 1){
             this.setStrokeButtonColor(strokeColor[0])
         }
         else{
@@ -560,26 +591,19 @@ class StyleToolbar extends AnnotationUIToolbarBase{
         }
         let strokeWidth = targets.map(item=>item.rescale ? item.rescale.strokeWidth : item.strokeWidth);
         if(strokeWidth.length==1 || new Set(strokeWidth).size==1){
-            this.dropdown.querySelectorAll('input[type="number"]').forEach(e=>e.value = strokeWidth[0]);
+            this.dropdown.querySelectorAll('[data-action="stroke-width"]').forEach(e=>e.value = strokeWidth[0]);
         }
         else{
             // console.warn('Multiple stroke widths not implemented; clearing input')
-            this.dropdown.querySelectorAll('input[type="number"]').forEach(e=>e.value='');
+            this.dropdown.querySelectorAll('[data-action="stroke-width"]').forEach(e=>e.value='');
         }
     }
     /**
      * Set the color and text of the Fill button.
      * @param {paper.Color} [color] - The color to set for the Fill button. Defaults to white.
      */
-    setFillButtonColor(color = new paper.Color('white')){
-        // let val = color ? color.toCSS(true) : 'none';
-        // let textcolor = color ? getContrastYIQ(color.toCSS(true)) : 'black';
-        if(!color) color = new paper.Color('white');
-        let val = color.toCSS(true);
-        let textcolor = getContrastYIQ(color.toCSS(true));
-        this.dropdown.querySelectorAll('[data-type="fill"] .preview .text').forEach(e=>e.style.color = textcolor);
-        this.dropdown.querySelectorAll('[data-type="fill"] .preview .color').forEach(e=>{e.style.backgroundColor=val; e.style.outlineColor=textcolor})
-        this.dropdown.querySelectorAll('input[type="color"][data-type="fill"]').forEach(e=>e.value = val);
+    setFillButtonColor(){
+        // Fill controls removed; keep API for callers.
     }
     /**
      * Set the color and text of the Stroke button.
@@ -589,11 +613,16 @@ class StyleToolbar extends AnnotationUIToolbarBase{
         // let val = color ? color.toCSS(true) : 'none';
         // let textcolor = color ? getContrastYIQ(color.toCSS(true)) : 'black';
         if(!color) color = new paper.Color('black');
+        if(!(color instanceof paper.Color)) color = new paper.Color(color);
         let val = color.toCSS(true);
         let textcolor = getContrastYIQ(color.toCSS(true));
         this.dropdown.querySelectorAll('[data-type="stroke"] .preview .text').forEach(e=>e.style.color = textcolor);
         this.dropdown.querySelectorAll('[data-type="stroke"] .preview .color').forEach(e=>{e.style.backgroundColor=val; e.style.outlineColor=textcolor})
         this.dropdown.querySelectorAll('input[type="color"][data-type="stroke"]').forEach(e=>e.value = val);
+        this.dropdown.querySelectorAll('.colorselect-host[data-type="stroke"]').forEach(e=>{
+            e.setAttribute('data-stroke-color', val);
+            e.dispatchEvent(new CustomEvent('stroke-color-sync', {detail: {value: val}}));
+        });
     }
     /**
      * Set the opacity of the Fill button.
@@ -726,10 +755,11 @@ export {ColorpickerCursor};
     
     let raster = ((itemToAverage.project && itemToAverage.project.overlay) || itemToAverage.overlay).getViewportRaster();
     return new Promise(function(resolve,reject){
-        raster.onLoad = function(){
+        const sample = function(){
             // clone the item and transform it back to viewport coordinates
-            const cloned = itemToAverage.clone();
-            cloned.transform(cloned.layer.matrix);
+            const cloned = itemToAverage.clone({insert: false});
+            cloned.data.userdata = {};
+            cloned.transform(itemToAverage.layer.matrix);
             let color = raster.getAverageColor(cloned);
             //clean up the cloned item and the raster
             raster.remove();
@@ -739,7 +769,9 @@ export {ColorpickerCursor};
             } 
             
             resolve(color);
-        }
+        };
+        if (raster.loaded) sample.call(raster);
+        else raster.onLoad = sample;
     });
     
 };

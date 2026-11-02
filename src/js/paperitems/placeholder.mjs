@@ -70,7 +70,7 @@ class Placeholder extends AnnotationItem{
      * @returns {Boolean} Whether this constructor supports the requested type/subtype
      */
     static supportsGeoJSONType(type, subtype = null){
-        return type.toLowerCase() === null && subtype === null;
+        return type == null && subtype == null;
     }
 
     /**
@@ -132,6 +132,7 @@ function initialize(geoJSONGeometryType, geometrySubtype) {
     };
     
     let newItem = paper.Item.fromGeoJSON(geoJSON);
+    newItem.data.userdata = {...newItem.data.userdata, ...this.data?.userdata};
     item.replaceWith(newItem);
     return newItem;
 }

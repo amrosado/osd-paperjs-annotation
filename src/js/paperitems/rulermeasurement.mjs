@@ -8,6 +8,7 @@
 
 import { MultiLinestring } from './multilinestring.mjs';
 import { paper } from '../paperjs.mjs';
+import {measurementDisplay} from '../utils/measurementDisplay.mjs';
 import { clampDecimals, normalizeRoundingMode, formatDecimal } from '../utils/measurementFormat.mjs';
 
 // Segment group layout: exactly 3 children (must match ruler.mjs): halo, path, labelGroup ([strokeLabel, fillLabel])
@@ -236,7 +237,8 @@ class RulerMeasurement extends MultiLinestring {
         const p2 = path.segments[1].point;
         const distance = p1.getDistance(p2);
         const midpoint = p1.add(p2).divide(2);
-        const ruler = this.paperItem.data.ruler || {};
+        const ruler = {...this.paperItem.data.ruler,
+            ...measurementDisplay(this.paperItem.project._scope.annotationToolkit, this.paperItem)};
         const unitsPerPixel = ruler.unitsPerPixel != null ? ruler.unitsPerPixel : 1;
         const units = ruler.units != null ? ruler.units : 'px';
         const decimals = clampDecimals(ruler.decimals, DEFAULT_DECIMALS);

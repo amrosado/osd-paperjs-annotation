@@ -1,3 +1,5 @@
+import {identifyAnnotationCollections, distinguishAnnotationCollections} from './utils/annotationIdentity.mjs';
+
 const ANNOTATION_DATA_ACTION_PREFIX = 'osdPaperjsAnnotation';
 
 const ACTION_TYPES = Object.freeze({
@@ -22,8 +24,31 @@ const initialAnnotationDataState = Object.freeze({
 
 function cloneData(value) {
     if (value == null) return value;
-    if (typeof structuredClone === 'function') return structuredClone(value);
-    return JSON.parse(JSON.stringify(value));
+    // Paper style/rescale payloads often include functions; structuredClone throws
+    // DataCloneError on those. Prefer JSON so Redux only stores serializable data.
+    try {
+        return JSON.parse(JSON.stringify(value));
+    } catch {
+        // Fall through for values JSON cannot represent.
+    }
+    if (typeof structuredClone === 'function') {
+        try {
+            return structuredClone(value);
+        } catch {
+            // Last resort: shallow copy containers.
+        }
+    }
+    if (Array.isArray(value)) return value.map((item) => cloneData(item));
+    if (typeof value === 'object') {
+        const next = {};
+        Object.keys(value).forEach((key) => {
+            const entry = value[key];
+            if (typeof entry === 'function') return;
+            next[key] = cloneData(entry);
+        });
+        return next;
+    }
+    return value;
 }
 
 function normalizeFeatureCollections(featureCollections) {
@@ -34,6 +59,7 @@ function normalizeFeatureCollections(featureCollections) {
 function withMutationMetadata(state, actionType, meta = null) {
     return {
         ...state,
+        featureCollections: distinguishAnnotationCollections(state.featureCollections),
         version: (state.version || 0) + 1,
         lastAction: actionType,
         lastMeta: cloneData(meta),
@@ -75,21 +101,46 @@ function makeAction(type, payload = {}, meta = {}) {
     return { type, payload, meta };
 }
 
+// Paper is an editing projection and may contain only part of the Redux tree.
+// Apply explicit edits/deletions without treating missing Paper items as deletes.
+function mergeProjectEdits(current, incoming, meta = {}) {
+    const featureKey = (feature) => feature?.properties?.userdata?.object_id ?? feature?.id;
+    const removedLayers = new Set(meta.removedLayerIds || []);
+    const removedFeatures = new Set(meta.removedFeatureIds || []);
+    const incomingIds = new Set(incoming.flatMap((collection) => (collection.features || []).map(featureKey)).filter(Boolean));
+    let next = normalizeFeatureCollections(current).filter((collection) => !removedLayers.has(collectionKey(collection)));
+    next = next.map((collection) => ({...collection, features: (collection.features || []).filter((feature) => (
+        !removedFeatures.has(featureKey(feature)) && !incomingIds.has(featureKey(feature))
+    ))}));
+    for (const collection of incoming) {
+        const key = collectionKey(collection);
+        if (removedLayers.has(key)) continue;
+        const index = next.findIndex((candidate) => collectionKey(candidate) === key);
+        const features = (collection.features || []).filter((feature) => !removedFeatures.has(featureKey(feature)));
+        const previous = index >= 0 ? next[index] : null;
+        const merged = {...previous, ...collection, features: [...(previous?.features || []), ...features]};
+        if (index >= 0) next[index] = merged;
+        else next.push(merged);
+    }
+    return next;
+}
+
 const annotationDataActions = Object.freeze({
-    hydrate: (state, meta) => makeAction(ACTION_TYPES.HYDRATE, cloneData(state), meta),
+    hydrate: (state, meta) => makeAction(ACTION_TYPES.HYDRATE, {...cloneData(state),
+        featureCollections: identifyAnnotationCollections(normalizeFeatureCollections(state?.featureCollections))}, meta),
     replaceFeatureCollections: (featureCollections, meta) => makeAction(
         ACTION_TYPES.REPLACE_FEATURE_COLLECTIONS,
-        { featureCollections: normalizeFeatureCollections(featureCollections) },
+        { featureCollections: identifyAnnotationCollections(normalizeFeatureCollections(featureCollections)) },
         meta,
     ),
     addFeatureCollections: (featureCollections, meta) => makeAction(
         ACTION_TYPES.ADD_FEATURE_COLLECTIONS,
-        { featureCollections: normalizeFeatureCollections(featureCollections) },
+        { featureCollections: identifyAnnotationCollections(normalizeFeatureCollections(featureCollections)) },
         meta,
     ),
     upsertFeatureCollection: (featureCollection, matcher = {}, meta) => makeAction(
         ACTION_TYPES.UPSERT_FEATURE_COLLECTION,
-        { featureCollection: cloneData(featureCollection), matcher: cloneData(matcher) },
+        { featureCollection: identifyAnnotationCollections([cloneData(featureCollection)])[0], matcher: cloneData(matcher) },
         meta,
     ),
     removeFeatureCollection: (matcher, meta) => makeAction(
@@ -106,7 +157,7 @@ const annotationDataActions = Object.freeze({
     clearCache: (key = null, meta) => makeAction(ACTION_TYPES.CLEAR_CACHE, { key }, meta),
     syncFromProject: (featureCollections, meta) => makeAction(
         ACTION_TYPES.SYNC_FROM_PROJECT,
-        { featureCollections: normalizeFeatureCollections(featureCollections) },
+        { featureCollections: identifyAnnotationCollections(normalizeFeatureCollections(featureCollections)) },
         meta,
     ),
 });
@@ -123,16 +174,16 @@ function annotationDataReducer(state = initialAnnotationDataState, action = {}) 
         case ACTION_TYPES.SYNC_FROM_PROJECT:
             return withMutationMetadata({
                 ...state,
-                featureCollections: normalizeFeatureCollections(action.payload?.featureCollections),
+                featureCollections: action.type === ACTION_TYPES.SYNC_FROM_PROJECT && action.meta?.partial
+                    ? mergeProjectEdits(state.featureCollections, normalizeFeatureCollections(action.payload?.featureCollections), action.meta)
+                    : normalizeFeatureCollections(action.payload?.featureCollections),
             }, action.type, action.meta);
 
         case ACTION_TYPES.ADD_FEATURE_COLLECTIONS:
             return withMutationMetadata({
                 ...state,
-                featureCollections: [
-                    ...normalizeFeatureCollections(state.featureCollections),
-                    ...normalizeFeatureCollections(action.payload?.featureCollections),
-                ],
+                featureCollections: normalizeFeatureCollections(action.payload?.featureCollections).reduce(
+                    (current, collection) => upsertFeatureCollection(current, collection), normalizeFeatureCollections(state.featureCollections)),
             }, action.type, action.meta);
 
         case ACTION_TYPES.UPSERT_FEATURE_COLLECTION: {
@@ -278,7 +329,17 @@ class AnnotationDataStore {
 
     syncFromToolkit(toolkit, meta = {}) {
         if (!toolkit || typeof toolkit.snapshotGeoJSON !== 'function') return this.state;
-        return this.dispatch(annotationDataActions.syncFromProject(toolkit.snapshotGeoJSON(), meta));
+        const snapshot = toolkit.snapshotGeoJSON();
+        const presentObjects = new Set(snapshot.flatMap(layer => (layer.features || []).map(feature => feature.id)));
+        const presentLayers = new Set(snapshot.map(layer => layer.id));
+        return this.dispatch(annotationDataActions.syncFromProject(snapshot, {
+            ...meta,
+            // Replacement and mask helpers also remove Paper items. A surviving
+            // object with the same identity is an edit, not a database delete.
+            removedFeatureIds: (meta.removedFeatureIds || []).filter(id => !presentObjects.has(id)),
+            removedLayerIds: (meta.removedLayerIds || []).filter(id => !presentLayers.has(id)),
+            partial: this.reduxEnabled,
+        }));
     }
 
     toGeoJSON() {
@@ -298,7 +359,14 @@ class AnnotationDataStore {
     }
 
     _notify(state = this.state) {
-        this._listeners.forEach((listener) => listener(state));
+        this._listeners.forEach((listener) => {
+            try {
+                listener(state);
+            } catch (error) {
+                // One bad subscriber (e.g. Paper projection) must not block GeoJS.
+                console.error('AnnotationDataStore listener failed:', error);
+            }
+        });
     }
 }
 

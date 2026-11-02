@@ -204,6 +204,11 @@ class RectangleTool extends AnnotationUITool{
     }
     
     onMouseDrag(ev){
+        if (!this.item || !this.item.layer || !this.item.view) {
+            // Item was removed mid-gesture (e.g. live-session replace); abort cleanly.
+            this.mode = null;
+            return;
+        }
         let refPt, currPt, cursorPt, angle;
         let center = this.item.center;
         if(this.mode=='creating'){

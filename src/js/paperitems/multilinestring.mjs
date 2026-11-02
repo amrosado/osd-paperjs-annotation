@@ -66,7 +66,7 @@ class MultiLinestring extends AnnotationItem{
                 return new paper.Point(point[0], point[1]);
             });
             let path = new paper.Path(pts);
-            path.strokeWidth = geoJSON.geometry.properties.strokeWidths[index];
+            path.strokeWidth = geoJSON.geometry.properties?.strokeWidths?.[index] ?? geoJSON.properties?.strokeWidth ?? 2;
             return path;
         });
     
@@ -88,7 +88,7 @@ class MultiLinestring extends AnnotationItem{
      * @returns {Boolean} Whether this constructor supports the requested type/subtype
      */
     static supportsGeoJSONType(type, subtype = null){
-        return type.toLowerCase() === 'multilinestring' && subtype === null;
+        return typeof type === 'string' && type.toLowerCase() === 'multilinestring' && subtype == null;
     }
 
     /**
@@ -147,20 +147,18 @@ class MultiLinestring extends AnnotationItem{
         const item = this.paperItem;
         if (!item.children.length) return {};
         const firstPath = this._getPathFromChild(item.children[0]);
-        return firstPath.style.toJSON();
-    }
-    /**
-     * Apply style properties to the multi-linestring annotation item.
-     * @param {Object} properties - The style properties to set.
-     * @description This method applies the provided style properties to the multi-linestring annotation item.
-     */
-    setStyle(properties){
-        Object.assign({},properties);
-        if(properties.rescale){
-            delete properties.rescale['strokeWidth'];
+        const style = firstPath.style.toJSON();
+        const logicalStroke = Number(item.rescale?.strokeWidth);
+        if (Number.isFinite(logicalStroke) && logicalStroke > 0) {
+            return {
+                ...style,
+                strokeWidth: logicalStroke,
+                rescale: {strokeWidth: logicalStroke},
+            };
         }
-        this._paperItem.style.set(properties);
+        return style;
     }
 }
+
 export{MultiLinestring};
 

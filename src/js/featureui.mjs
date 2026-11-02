@@ -37,7 +37,6 @@
  */
 
 import {EditableContent} from './utils/editablecontent';
-import { OpenSeadragon } from './osd-loader';
 import { domObjectFromHTML } from './utils/domObjectFromHTML';
 import { datastore } from './utils/datastore';
 import { convertFaIcons } from './utils/faIcon';
@@ -114,7 +113,7 @@ class FeatureUI{
             'item-replaced':(ev)=>{ 
                 // console.log('item-replaced',ev);
                 //check label first because it is dynamically fetched from the referenced this.paperItem object
-                if(this.label.source=='user-defined'){
+                if(this.label?.source=='user-defined'){
                     ev.item.displayName = this.label;
                 }
                 this.paperItem = ev.item;
@@ -135,7 +134,8 @@ class FeatureUI{
             this.paperItem.emit('selected');
         }
 
-        this.label ? this.updateLabel() : this.setLabel('Creating...', 'initializing');
+        // A list label must not modify an annotation while projecting a remote tree.
+        this.label ? this.updateLabel() : this._editableName.setText('Creating...');
         
     }
 
@@ -162,6 +162,7 @@ class FeatureUI{
      * Update the label of the feature in the UI element.
      */
     updateLabel(){
+        if (this._editableName.element.classList.contains('editing')) return;
         // this._element.find('.feature-item.name').text(this.label);//.trigger('value-changed',[l]);
         this._editableName.setText(this.label);
     }
@@ -213,19 +214,35 @@ class FeatureUI{
      * @param {boolean} [immediately=false] - Whether to center the feature immediately or not.
      */
     centerItem(immediately = false){
-        let viewport = this.paperItem.project.overlay.viewer.viewport;
-        let bounds = this.paperItem.bounds;
-        let center = viewport.imageToViewportCoordinates(bounds.center.x,bounds.center.y);
-        let scale=1.5;
-        let xy = viewport.imageToViewportCoordinates(bounds.center.x - bounds.width/scale, bounds.center.y - bounds.height/scale);
-        let wh = viewport.imageToViewportCoordinates(2*bounds.width/scale, 2*bounds.height/scale);
-        let rect=new OpenSeadragon.Rect(xy.x, xy.y, wh.x,wh.y);
-        let vb = viewport.getBounds();
-        if(rect.width > vb.width || rect.height > vb.height){
-            viewport.fitBounds(rect, immediately);
-        }
-        else{
-            viewport.panTo(center, immediately);
+        const viewer = this.paperItem?.project?.overlay?.viewer;
+        const viewport = viewer?.viewport;
+        const bounds = this.paperItem?.bounds;
+        if (!viewport || !bounds || !Number.isFinite(bounds.center?.x) || !Number.isFinite(bounds.center?.y)) return;
+        // Point markers are tiny in image space; keep a readable minimum view around them.
+        const minSpan = 480;
+        const width = Math.max(Number(bounds.width) || 0, minSpan);
+        const height = Math.max(Number(bounds.height) || 0, minSpan);
+        const centerX = bounds.center.x;
+        const centerY = bounds.center.y;
+        try {
+            if (typeof viewport.imageToViewportRectangle === 'function' && typeof viewport.fitBounds === 'function') {
+                const rect = viewport.imageToViewportRectangle({
+                    x: centerX - width / 2,
+                    y: centerY - height / 2,
+                    width,
+                    height,
+                });
+                if (rect && rect.width > 0 && rect.height > 0) {
+                    viewport.fitBounds(rect, immediately);
+                    return;
+                }
+            }
+            const center = viewport.imageToViewportCoordinates(centerX, centerY);
+            if (Number.isFinite(center?.x) && Number.isFinite(center?.y)) {
+                viewport.panTo(center, immediately);
+            }
+        } catch (error) {
+            console.warn('Unable to center feature in viewport', error);
         }
     }
     
@@ -243,7 +260,7 @@ function makeFeatureElement(){
             <span class='onhover fa-solid fa-crop-simple bounding-element' data-action="bounds" title='Bounding element'></span>
             <span class='feature-item name'></span>
             <span class='onhover fa-solid fa-palette' data-action='style' title='Open style editor'></span>
-            <span class='onhover fa-solid fa-binoculars' data-action='zoom-to' title='View this feature'></span>
+            <span class='fa-solid fa-binoculars' data-action='zoom-to' title='Go to this object'></span>
             <span class='onhover fa-solid fa-trash-can' data-action='trash' title='Remove'></span>
         </div>
     </div>

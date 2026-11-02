@@ -423,8 +423,30 @@ canvas.transform-tool-rotate{
 .wand-toolbar .toggles{
     display:grid;
     column-gap:2px;
-    grid-template-columns:7em 5em 8em;
+    grid-template-columns:repeat(auto-fit, minmax(6em, 1fr));
+    grid-column:1 / -1;
+    min-width:0;
 }
+.dropdown.wand-toolbar{
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    gap:0.5em;
+    width:100%;
+    box-sizing:border-box;
+    white-space:normal;
+}
+.wand-toolbar .threshold-container{
+    grid-column:1 / -1;
+    min-width:0;
+}
+.wand-toolbar input{
+    box-sizing:border-box;
+    width:100%;
+    max-width:100%;
+    min-width:0;
+    margin:0;
+}
+.wand-toolbar .option-toggle{white-space:normal; overflow-wrap:anywhere;}
 .wand-toolbar .option-toggle{
     display:grid;
     grid-template-rows:auto auto;
@@ -448,9 +470,16 @@ canvas.transform-tool-rotate{
 
 .style-toolbar .style-row{
     display:grid;
-    grid-template-columns:auto auto auto auto;
+    grid-template-columns:auto auto auto;
     column-gap:0.5em;
     align-items:center;
+}
+.style-toolbar .colorselect-host{
+    min-width: 7.5em;
+    align-self: center;
+}
+.style-toolbar .colorselect-host .color-select-container{
+    width: 100%;
 }
 .style-toolbar .style-item{
     display:inline-block;
@@ -470,6 +499,27 @@ canvas.transform-tool-rotate{
 }
 .style-toolbar input[type="number"]{
     width:3.5em;
+}
+.point-text-style-controls,
+.style-toolbar .point-text-style-controls{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:flex-end;
+    gap:0.5em 0.75em;
+    padding:0.4em 0;
+}
+.point-text-style-controls label{
+    display:flex;
+    flex-direction:column;
+    gap:0.2em;
+    font-size:0.85em;
+    min-width:0;
+}
+.point-text-style-controls select{
+    font:inherit;
+    color:inherit;
+    max-width:100%;
+    min-height:1.8em;
 }
 .style-toolbar .colorpicker-row.hidden{
     display:none;

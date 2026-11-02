@@ -38,6 +38,7 @@
 
 import {AnnotationUITool, AnnotationUIToolbarBase} from './annotationUITool.mjs';
 import { PointText } from '../paperitems/pointtext.mjs';
+import { normalizePointTextStyle, pointTextStyleControlsHTML } from '../utils/pointTextStyle.mjs';
 import { makeFaIcon } from '../utils/faIcon.mjs';
 
 /**
@@ -145,6 +146,7 @@ class PointTextTool extends AnnotationUITool{
             this.itemToCreate.initializeGeoJSONFeature('Point','PointText');
             this.refreshItems();
             this.item.children[1].content = this.toolbarControl.getValue();
+            this.item.annotationItem.setStyle(this.toolbarControl.getTextStyle());
             this.item.position=ev.point;
             this.cursor.visible=false;
             this.toolbarControl.updateInstructions('Point:PointText');
@@ -174,6 +176,10 @@ class PointTextTool extends AnnotationUITool{
         let text = (this.item && this.item.annotationItem.subtype=='PointText') ? this.item.children[1].content : '';
         this.toolbarControl.setItemText(text);
         this.cursor.children[1].content = text.length ? text : this.toolbarControl.input.getAttribute('placeholder');
+        if (this.item?.annotationItem.subtype === 'PointText') {
+            this.toolbarControl.setTextStyle(this.item.data.pointTextStyle);
+        }
+        this.cursor.annotationItem.setStyle(this.toolbarControl.getTextStyle());
     }
 }
 export{PointTextTool};
@@ -209,6 +215,19 @@ class PointTextToolbar extends AnnotationUIToolbarBase{
         this.input.setAttribute('type','text');
         this.input.setAttribute('placeholder', 'Enter text');
         this.dropdown.appendChild(this.input);
+        this.dropdown.insertAdjacentHTML('beforeend', pointTextStyleControlsHTML());
+        const updateTextStyle = () => {
+            const size = this.dropdown.querySelector('[data-action="text-size"]');
+            if (!size.value || !size.validity.valid) return;
+            const style = this.getTextStyle();
+            tool.cursor.annotationItem.setStyle(style);
+            if (tool.item?.annotationItem.subtype === 'PointText') {
+                tool.item.annotationItem.setStyle(style);
+                tool.emitItemEvent('item-updated', {item: tool.item, tool, reason: 'text-style'});
+            }
+        };
+        this.dropdown.querySelector('[data-action="text-size"]').addEventListener('input', updateTextStyle);
+        this.dropdown.querySelector('[data-action="text-font"]').addEventListener('change', updateTextStyle);
         this.input.addEventListener('input', function(){
             let value = self.getValue();
             if(self.tool.item && self.tool.item.annotationItem.subtype=='PointText'){
@@ -238,6 +257,17 @@ class PointTextToolbar extends AnnotationUIToolbarBase{
     getValue(){
         let input = this.input;
         return input.value.trim() || input.getAttribute('placeholder');
+    }
+
+    getTextStyle(){
+        return normalizePointTextStyle({fontSize: this.dropdown.querySelector('[data-action="text-size"]').value,
+            fontFamily: this.dropdown.querySelector('[data-action="text-font"]').value});
+    }
+
+    setTextStyle(style){
+        const normalized = normalizePointTextStyle(style);
+        this.dropdown.querySelector('[data-action="text-size"]').value = normalized.fontSize;
+        this.dropdown.querySelector('[data-action="text-font"]').value = normalized.fontFamily;
     }
     /**
      * Determine if the toolbar is enabled for the given annotation mode.

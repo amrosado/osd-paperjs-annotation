@@ -303,6 +303,11 @@ class SelectTool extends AnnotationUITool{
                 eventSummary: self._eventDebugSummary(ev),
             });
             if(ev.downPoint.subtract(ev.point).length==0){
+                if (self.preferAnnotationSelection) {
+                    const annotationItems = self._annotationItemsAtEvent(ev);
+                    self._applySelectionAction(annotationItems, keepExistingSelection, true);
+                    return;
+                }
                 //not a click-and-drag, do element selection
                 const geojsRows = self._geojsDirectRowsAtEvent(ev);
                 if (!geojsRows.length && self.selection_action === 'deselect' && self._lastGeojsDirectHitHadRows) return;
@@ -335,6 +340,11 @@ class SelectTool extends AnnotationUITool{
                 self._applySelectionAction(hitItems, keepExistingSelection, true);
                 
             } else{
+                if (self.preferAnnotationSelection) {
+                    const annotationItems = self._annotationItemsInArea(ev, selectionDownDisplayPoint);
+                    self._applySelectionAction(annotationItems, keepExistingSelection, false);
+                    return;
+                }
                 //click and drag, do area-based selection
                 const geojsRows = self._geojsDirectRowsInArea(ev, false, selectionDownDisplayPoint);
                 if (!geojsRows.length && self.selection_action === 'deselect' && self._lastGeojsDirectHitHadRows) return;
@@ -787,6 +797,86 @@ class SelectTool extends AnnotationUITool{
             : directRows;
     }
 
+    _annotationItemsAtEvent(ev){
+        const rows = this._annotationRowsAtEvent(ev);
+        const fromRows = this._paperItemsForAnnotationRows(rows);
+        if (fromRows.length) return fromRows;
+        const paperItem = this._paperAnnotationAtPoint(ev?.point);
+        return paperItem ? [paperItem] : [];
+    }
+
+    _annotationItemsInArea(ev, downDisplayPoint){
+        const rows = this._annotationRowsInArea(ev, downDisplayPoint);
+        const fromRows = this._paperItemsForAnnotationRows(rows);
+        const paperItems = (this._paperAnnotationsInRectangle(ev?.downPoint, ev?.point) || []);
+        const seen = new Set(fromRows);
+        paperItems.forEach((item) => {
+            if (!seen.has(item)) {
+                seen.add(item);
+                fromRows.push(item);
+            }
+        });
+        return fromRows;
+    }
+
+    _paperAnnotationAtPoint(point){
+        if (!point || !this.ps?.project?.hitTest) return null;
+        const hitResult = this.ps.project.hitTest(point, {
+            fill: true,
+            stroke: true,
+            segments: true,
+            tolerance: this.getTolerance(5),
+            match: (hit) => this._isAnnotationItem(hit.item?.isGeoJSONFeature ? hit.item : hit.item?.parent),
+        });
+        if (!hitResult) return null;
+        const item = hitResult.item?.isGeoJSONFeature ? hitResult.item : hitResult.item?.parent;
+        return this._isAnnotationItem(item) ? item : null;
+    }
+
+    _paperAnnotationsInRectangle(pointA, pointB){
+        if (!pointA || !pointB) return [];
+        return (this._paperBoundsItemsInRectangle?.(pointA, pointB, false) || [])
+            .filter((item) => this._isAnnotationItem(item));
+    }
+
+    _annotationRowsAtEvent(ev){
+        if (!this.geojsDisplay?.enabled) return [];
+        const displayPoint = this._eventDisplayPoint(ev);
+        const rows = displayPoint && this.geojsDisplay.hitTestRowsAtDisplayPoint
+            ? this.geojsDisplay.hitTestRowsAtDisplayPoint(displayPoint)
+            : this.geojsDisplay.hitTestRowsAtProjectPoint?.(ev?.point);
+        return (rows || []).filter((row) => this._isAnnotationRow(row));
+    }
+
+    _annotationRowsInArea(ev, downDisplayPoint){
+        if (!this.geojsDisplay?.enabled) return [];
+        const currentDisplayPoint = this._eventDisplayPoint(ev);
+        const rows = downDisplayPoint && currentDisplayPoint && this.geojsDisplay.findRowsInDisplayRectangle
+            ? this.geojsDisplay.findRowsInDisplayRectangle(downDisplayPoint, currentDisplayPoint, false)
+            : this.geojsDisplay.findRowsInProjectRectangle?.(ev?.downPoint, ev?.point, false);
+        return (rows || []).filter((row) => this._isAnnotationRow(row));
+    }
+
+    _paperItemsForAnnotationRows(rows){
+        const items = [];
+        const seen = new Set();
+        (rows || []).forEach((row) => {
+            const item = row?.paperItem || this.geojsDisplay?.getPaperItemForRow?.(row, { create: false });
+            if (!item || seen.has(item) || !this._isAnnotationItem(item)) return;
+            seen.add(item);
+            items.push(item);
+        });
+        return items;
+    }
+
+    _isAnnotationRow(row){
+        return Boolean(row) && !row.directEmbedding && !row.directEmbeddingOverview;
+    }
+
+    _isAnnotationItem(item){
+        return this._isItemSelectable(item) && !item?.data?.wsvvEmbeddingGrid;
+    }
+
     _geojsDirectRowsAtEvent(ev){
         if (!this.geojsDisplay?.enabled) return [];
         const displayPoint = this._eventDisplayPoint(ev);
@@ -1091,7 +1181,16 @@ class SelectTool extends AnnotationUITool{
         }
 
         if (action === 'select') {
-            selectableItems.forEach(item=>item.select(true));
+            if (!selectableItems.length && !keepExistingSelection && this.preferAnnotationSelection) {
+                const scope = this.ps || this.project?.paperScope;
+                scope?.findSelectedItems?.()
+                    ?.filter((item) => item?.isGeoJSONFeature && !item?.data?.wsvvEmbeddingGrid)
+                    .forEach((item) => item.deselect?.());
+                this.onSelectionChanged?.();
+                this.geojsDisplay?.scheduleUpdate();
+                return;
+            }
+            selectableItems.forEach((item, index) => item.select(keepExistingSelection || index > 0));
             if (selectableItems.length > 0) {
                 this.onSelectionChanged?.();
             }

@@ -92,18 +92,28 @@ class AnnotationUITool extends ToolBase{
 
         this.tool.onMouseDown = ev => {
             if (!annotationToolPrimaryButtonDownOrUp(ev)) return;
-            this.onMouseDown(this._transformEvent(ev));
+            this._pointerDown = true;
+            this.onMouseDown(this._transformEvent(ev, 'down'));
         }
         this.tool.onMouseDrag = ev => {
             if (!annotationToolPrimaryButtonActiveDrag(ev)) return;
-            this.onMouseDrag(this._transformEvent(ev));
+            this.onMouseDrag(this._transformEvent(ev, 'drag'));
         }
         this.tool.onMouseMove = ev => {
             this.onMouseMove(this._transformEvent(ev));
         }
         this.tool.onMouseUp = ev => {
             if (!annotationToolPrimaryButtonDownOrUp(ev)) return;
-            this.onMouseUp(this._transformEvent(ev));
+            if (!this._pointerDown) return;
+            try {
+                this.onMouseUp(this._transformEvent(ev, 'up'));
+            } finally {
+                this._pointerDown = false;
+                this._imageGesture = null;
+                const completed = this._createdItemToComplete;
+                this._createdItemToComplete = null;
+                if (completed) this.project.paperScope.annotationToolkit?.finishDrawingItem?.(completed, this);
+            }
         }
 
     }
@@ -151,6 +161,8 @@ class AnnotationUITool extends ToolBase{
     deactivate(finishToolAction){
         if(!this._active) return;//breaks possible infinite loops of tools activating/deactivating each other
         this._active=false;
+        this._pointerDown = false;
+        this._imageGesture = null;
         this.toolbarControl.deactivate();
 
         this.resetCanvasZIndex();
@@ -350,7 +362,7 @@ class AnnotationUITool extends ToolBase{
         }
     }
     // private
-    _transformEvent(ev){
+    _transformEvent(ev, phase){
         let matrix = this.targetMatrix;
         let transformed = {
             point: matrix.inverseTransform(ev.point),
@@ -360,6 +372,18 @@ class AnnotationUITool extends ToolBase{
         };
         let deltaStart = ev.point.subtract(ev.delta);
         transformed.delta = transformed.point.subtract(matrix.inverseTransform(deltaStart));
+
+        if (phase === 'down') {
+            this._imageGesture = {down: transformed.point.clone(), last: transformed.point.clone()};
+        } else if (this._imageGesture && (phase === 'drag' || phase === 'up')) {
+            // Paper's downPoint/lastPoint were measured using an older view
+            // matrix if the sidebar, viewport, or image layer resized mid-drag.
+            transformed.downPoint = this._imageGesture.down.clone();
+            transformed.lastPoint = this._imageGesture.last.clone();
+            transformed.middlePoint = transformed.point.add(transformed.lastPoint).divide(2);
+            transformed.delta = transformed.point.subtract(transformed.lastPoint);
+            this._imageGesture.last = transformed.point.clone();
+        }
 
         ev.original = {
             point: ev.point,

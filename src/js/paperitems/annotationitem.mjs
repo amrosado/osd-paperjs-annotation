@@ -41,6 +41,7 @@ import { paper } from '../paperjs.mjs';
 import { AnnotationToolkit } from '../annotationtoolkit.mjs';
 import { validateGeoJSONGeometry } from '../utils/geojsonGeometryShape.mjs';
 import { validatePaperItemShapeContract } from '../utils/paperItemShapeContract.mjs';
+import {newAnnotationId} from '../utils/annotationIdentity.mjs';
 
 /**
  * Checklist for new AnnotationItem subclasses (see `convertPaperItemToAnnotation` + `toGeoJSONGeometry`):
@@ -122,7 +123,18 @@ class AnnotationItem{
      * @description This method returns the style properties of the annotation item in JSON format.
      */
     getStyleProperties(){
-        return this.paperItem.style.toJSON();
+        const style = this.paperItem.style?.toJSON?.() || {};
+        // Prefer logical rescale stroke so peers/GeoJS get screen-pixel weight,
+        // not the post-applyRescale Paper coordinate value.
+        const logicalStroke = Number(this.paperItem.rescale?.strokeWidth);
+        if (Number.isFinite(logicalStroke) && logicalStroke > 0) {
+            return {
+                ...style,
+                strokeWidth: logicalStroke,
+                rescale: {strokeWidth: logicalStroke},
+            };
+        }
+        return style;
     }
     // static getGeometry(){}
     static onTransform(){}
@@ -200,7 +212,28 @@ class AnnotationItem{
      * @description This method sets the style properties of the annotation item using the provided properties object.
      */
     setStyle(properties){
-        this._paperItem && this._paperItem.style.set(properties);
+        if (!this._paperItem || !properties || typeof properties !== 'object') return;
+        const incoming = {...properties};
+        const logicalStroke = Number(incoming.rescale?.strokeWidth ?? incoming.strokeWidth);
+        if (Number.isFinite(logicalStroke) && logicalStroke > 0) {
+            this._paperItem.rescale = this._paperItem.rescale || {};
+            this._paperItem.rescale.strokeWidth = logicalStroke;
+            incoming.strokeWidth = logicalStroke;
+        }
+        delete incoming.rescale;
+        delete incoming.userdata;
+        delete incoming.session_layer;
+        delete incoming.label;
+        delete incoming.selected;
+        delete incoming.radius;
+        delete incoming.marker;
+        // Paper lazily reads color strings. Nested text styles may overwrite a
+        // color before that read, so pass detached Color instances to setters.
+        for (const key of ['strokeColor', 'fillColor', 'selectedColor']) {
+            if (typeof incoming[key] === 'string') incoming[key] = new paper.Color(incoming[key]);
+        }
+        this._paperItem.style.set(incoming);
+        this._paperItem.applyRescale?.();
     }
 
     // default implementation; can be overridden for custom behavior by subclasses
@@ -211,14 +244,17 @@ class AnnotationItem{
      * properties, style, and other relevant information.
      */
     toGeoJSONFeature(){
+        const userdata = this.paperItem.data?.userdata;
+        const objectId = userdata && typeof userdata === 'object' ? userdata.object_id : null;
         let geoJSON = {
             type:'Feature',
+            id: objectId || undefined,
             geometry:this.toGeoJSONGeometry(),
             properties:{
                 label:this.paperItem.displayName,
                 selected:this.paperItem.selected,
                 ...this.getStyleProperties(),
-                userdata:this.paperItem.data.userdata,
+                userdata,
             }
         }
 
@@ -316,8 +352,18 @@ class AnnotationItemFactory{
 
         let geomType = geoJSON.geometry?.type;
         let geomSubtype = geoJSON.geometry?.properties?.subtype;
+        // Incomplete live-session / store features can have null geometry.type.
+        if (typeof geomType !== 'string' || !geomType) {
+            return;
+        }
 
-        let constructors = _constructors.filter(c=>c.supportsGeoJSONType(geomType, geomSubtype) );
+        let constructors = _constructors.filter(c=>{
+            try {
+                return c.supportsGeoJSONType(geomType, geomSubtype);
+            } catch {
+                return false;
+            }
+        });
         
         return constructors.slice(-1)[0]; //return the most recent constructor that supports this type
     }
@@ -338,8 +384,10 @@ class AnnotationItemFactory{
         }
         let ctor = AnnotationItemFactory.getConstructor(geoJSON);
         if(ctor){
-            let annotationItem = new ctor(geoJSON);
-            annotationItem.paperItem.data.userdata = geoJSON.properties?.userdata;
+            const userdata = {...geoJSON.properties?.userdata,
+                object_id: geoJSON.properties?.userdata?.object_id || geoJSON.id || newAnnotationId()};
+            let annotationItem = new ctor({...geoJSON, properties: {...geoJSON.properties, userdata}});
+            annotationItem.paperItem.data.userdata = userdata;
             return annotationItem.paperItem;
         }
     }
@@ -355,11 +403,9 @@ class AnnotationItemFactory{
             error('Only paper.Items constructed by AnnotationItem implementations are supported');
             return;
         }
-        let geoJSON = {
-            type:'Feature',
-            geometry: item.annotationItem.toGeoJSONGeometry(),
-            properties:item.annotationItem._props,
-        };
+        const geoJSON = item.annotationItem.toGeoJSONFeature();
+        geoJSON.id = newAnnotationId();
+        geoJSON.properties.userdata = {...geoJSON.properties.userdata, object_id: geoJSON.id};
         return AnnotationItemFactory.itemFromGeoJSON(geoJSON);
     }
 
@@ -389,7 +435,12 @@ function convertPaperItemToAnnotation(annotationItem){
 
     // set fillOpacity and strokeOpacity properties based on the properties object
     // If explicit opacity was provided, keep it; otherwise derive from the color alpha (back-compat).
-    item.fillOpacity = (properties && properties.fillOpacity != null) ? Number(properties.fillOpacity) : (item.fillColor ? item.fillColor.alpha : 1);
+    // Annotations are stroke-only; never inherit opaque fills from color alpha.
+    item.fillOpacity = (properties && properties.fillOpacity != null) ? Number(properties.fillOpacity) : 0;
+    if (!(Number.isFinite(item.fillOpacity) && item.fillOpacity > 0)) {
+        item.fillOpacity = 0;
+        if (item.fillColor) item.fillColor = null;
+    }
 
     item.strokeOpacity = (properties && properties.strokeOpacity != null) ? Number(properties.strokeOpacity) : (item.strokeColor ? item.strokeColor.alpha : 1);
 
@@ -460,21 +511,25 @@ function enhancedReplaceWith(newItem){
     }
     const selectedBeforeReplace = this.selected;
     const dataBeforeReplace = this.data || {};
+    const incomingData = {...(newItem.data || {})};
     newItem._callbacks = this._callbacks;
-    let rescale = OpenSeadragon.extend(true,this.rescale,newItem.rescale);
-    newItem.style = this.style; //to do: make this work with rescale properties, so that rescale.strokeWidth doesn't overwrite other props
-    newItem.rescale=rescale;
+    // Keep the replacement item's own style. Copying `this.style` onto newItem
+    // caused collaborator style updates to migrate onto the wrong geometry.
+    let rescale = OpenSeadragon.extend(true, this.rescale, newItem.rescale);
+    newItem.rescale = rescale;
     //replace in the paper hierarchy
     this.emit('item-replaced',{item:newItem});
     newItem.project.emit('item-replaced',{item:newItem});
     paper.Item.prototype.replaceWith.call(this, newItem);
 
-    // Preserve Paper.js item.data for runtime continuity (shallow copy).
-    // Old keys win if there is overlap.
-    newItem.data = newItem.data || {};
-    Object.assign(newItem.data, dataBeforeReplace);
+    // Preserve prior runtime data, but let the incoming item's fields win.
+    newItem.data = {...dataBeforeReplace, ...incomingData};
 
     newItem.selected = selectedBeforeReplace;
+    if (newItem.fillOpacity == null || Number(newItem.fillOpacity) > 0) {
+        newItem.fillOpacity = 0;
+        if (newItem.fillColor) newItem.fillColor = null;
+    }
     newItem.updateFillOpacity();
     newItem.applyRescale();
     newItem.project.view.update();

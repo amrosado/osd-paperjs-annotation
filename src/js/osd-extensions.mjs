@@ -52,6 +52,16 @@ function installOSDExtensions({ PaperOverlay } = {}) {
     if (!osdExtensionsInstalled) {
         osdExtensionsInstalled = true;
 
+        // Some OSD versions read tracker.tracking even though MouseTracker
+        // exposes the actual state only through isTracking(). Never restore an
+        // undefined navigation state after a local selection tool releases it.
+        const nativeIsMouseNavEnabled = OpenSeadragon.Viewer.prototype.isMouseNavEnabled;
+        OpenSeadragon.Viewer.prototype.isMouseNavEnabled = function () {
+            if (typeof this.innerTracker?.tracking === 'boolean') return this.innerTracker.tracking;
+            if (typeof this.innerTracker?.isTracking === 'function') return Boolean(this.innerTracker.isTracking());
+            return Boolean(nativeIsMouseNavEnabled?.call(this));
+        };
+
         definePrototypeProperty(OpenSeadragon.Viewer.prototype, 'PaperOverlays', {
             get: function PaperOverlays(){
                 return this._PaperOverlays || (this._PaperOverlays = []);
@@ -170,7 +180,7 @@ function _setupPaperForTiledImage(overlay){
     
     function updateMatrix(){
         const scaleFactor = overlay.scaleFactor;
-        const bounds = _this.getBoundsNoRotate();
+        const bounds = _this.getBoundsNoRotate(true);
         const sourceWidth = _this.source?.width || _this.source?.dimensions?.x || _this.getContentSize?.().x;
         if (!isFinitePositive(scaleFactor) || !isFinitePositive(bounds?.width) || !isFinitePositive(sourceWidth)) {
             return;
@@ -193,6 +203,8 @@ function _setupPaperForTiledImage(overlay){
     }
     tiledImage.addHandler('bounds-change',updateMatrix);
     overlay.addHandler('update-scale',updateMatrix);
+    tiledImage.viewer?.addHandler?.('viewport-change', updateMatrix);
+    tiledImage.viewer?.addHandler?.('animation', updateMatrix);
     updateMatrix();
 }
 

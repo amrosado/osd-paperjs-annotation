@@ -121,7 +121,7 @@ class ToolBase{
         if(!item){
             item = this.item;
         }
-        const scalefactor = item?.layer.scaling.x || 1;
+        const scalefactor = item?.layer?.scaling?.x || 1;
         return pixels / scalefactor / this.project.getZoom();
     }
     /**
@@ -204,6 +204,7 @@ class ToolBase{
     emitItemEvent(eventType, payload) {
         if (!payload || !payload.item) return;
         if (!payload.tool) payload = { ...payload, tool: this };
+        if (eventType === 'item-created') this._createdItemToComplete = payload.item;
         this.broadcast(eventType, payload);
         const project = this.project?.paperScope?.project;
         if (project) project.emit(eventType, payload);

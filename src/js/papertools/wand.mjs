@@ -450,7 +450,6 @@ class WandTool extends AnnotationUITool{
      * @param {Array<number>} sampleColor - The color sampled from the selected item.
      */
     rasterPreview(binaryMask, sampleColor){
-        let self=this;
         let cmap = {0: this.colors.nullColor, 1: this.colors.defaultColor};
         //If a sample color is known, "invert" it for better contrast relative to background image
         if(sampleColor){
@@ -480,15 +479,9 @@ class WandTool extends AnnotationUITool{
         }
         this.preview.setImageData(imdata, new paper.Point(0,0));
         
-        function tween1(){
-            // console.log('tween1', self.preview.id)
-            self.preview.tweenTo({opacity:0.15},{duration:1200,easing:'easeInQuart'}).then(tween2);
-        }
-        function tween2(){
-            // console.log('tween2', self.preview.id)
-            self.preview.tweenTo({opacity:1},{duration:800,easing:'easeOutCubic'}).then(tween1);
-        }
-        tween1();
+        // Replacing/closing a preview must not leave recursive tweens running
+        // against a removed raster or a different selection.
+        this.preview.opacity = 0.5;
     } 
     
     

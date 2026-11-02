@@ -83,7 +83,7 @@ class RasterTool extends AnnotationUITool{
             item.layer.addChild(raster);
         
         
-            raster.onLoad = function(){
+            const convert = function(){
                 //get the subregion in pixel coordinates of the large raster by inverse transforming the bounding rect of the item
                 let offset = new paper.Point(this.width/2,this.height/2);
                 
@@ -111,7 +111,8 @@ class RasterTool extends AnnotationUITool{
                             item,
                         ]
                     },
-                    properties:{}
+                    id: item.data?.userdata?.object_id,
+                    properties: {...item.annotationItem.getStyleProperties(), userdata: {...item.data?.userdata}}
                 }
 
                 let newItem = paper.Item.fromGeoJSON(geoJSON);
@@ -122,7 +123,9 @@ class RasterTool extends AnnotationUITool{
                 if (tk && tk._emitIntegrationEvent) tk._emitIntegrationEvent('rasterized', { item: newItem ?? null }, { tool: self });
 
                 this.remove();
-            }
+            };
+            if (raster.loaded) convert.call(raster);
+            else raster.onLoad = convert;
         }
 
     }

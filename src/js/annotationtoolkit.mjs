@@ -57,9 +57,12 @@ import { RulerMeasurement } from './paperitems/rulermeasurement.mjs';
 import { Raster } from './paperitems/raster.mjs';
 import { Point } from './paperitems/point.mjs';
 import { PointText } from './paperitems/pointtext.mjs';
+import {refreshMeasurementDisplay} from './utils/measurementDisplay.mjs';
+import {newAnnotationId} from './utils/annotationIdentity.mjs';
 import { Rectangle } from './paperitems/rectangle.mjs';
 import { Ellipse } from './paperitems/ellipse.mjs';
 import { cyrb53 } from './utils/hash.mjs';
+import {isCompleteAnnotationGeometry} from './utils/shapeGeometry.mjs';
 
 //extend paper prototypes to add functionality
 //property definitions
@@ -167,9 +170,9 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         }
         
         this._defaultStyle = {
-            fillColor: new paper.Color('white'),
+            fillColor: null,
             strokeColor: new paper.Color('black'),
-            fillOpacity:1,
+            fillOpacity: 0,
             strokeOpacity:1,
             strokeWidth: 1,
             rescale: {
@@ -218,6 +221,7 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
             if(this.options.cacheAnnotations){
                 this._loadCachedAnnotations(ev.item);
             }
+            if (this.dataStore?.reduxEnabled) this.projectFromDataStore({force: true});
         })
         this.viewer.world.addHandler('remove-item',ev=>{
             if(this.options.cacheAnnotations){
@@ -263,6 +267,9 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
 
         if (this.options.geojs_display) {
             this.enableGeoJSDisplay(this.options.geojs_display === true ? {} : this.options.geojs_display);
+            // Projection may have run before GeoJS existed; paint store rows now.
+            this.geojsDisplay?.syncFromStore?.();
+            this.geojsDisplay?.requestViewportUpdate?.({force: true});
         }
 
     }
@@ -652,13 +659,48 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         const parent = options.layer || this.paperScope.project;
         //find all featureCollection items and convert to GeoJSON compatible structures
         return parent.getItems({match:i=>i.isGeoJSONFeatureCollection}).map(grp=>{
-            
+            const image = grp.layer?.tiledImage;
+            const fileId = image?.wsvvFileId ?? image?.file?.id ?? image?.source?.file_id;
+            grp.data.userdata = grp.data.userdata || {};
+            grp.data.userdata.layer_id ||= newAnnotationId();
+            const userdata = {...(grp.data?.userdata || {})};
+            const layerId = userdata.layer_id || null;
+            if (layerId) userdata.layer_id = layerId;
+            if (!userdata.layer_label) {
+                userdata.layer_label = grp.displayName || grp.name || 'Annotation Group';
+            }
             let geoJSON = {
                 type:'FeatureCollection',
-                features: grp.descendants.filter(d=>d.annotationItem).map(d=>d.annotationItem.toGeoJSONFeature()),
+                id: layerId || undefined,
+                features: grp.descendants.filter(d => d.annotationItem && d.annotationItem.type !== null
+                    && !(this.paperScope.getActiveTool?.()?._pointerDown && this.paperScope.getActiveTool().item === d)).map(d=>{
+                    d.data.userdata = d.data.userdata || {};
+                    d.data.userdata.object_id ||= newAnnotationId();
+                    const feature = d.annotationItem.toGeoJSONFeature();
+                    delete feature.properties.selected;
+                    feature.properties.coordinateSpace = 'image-pixels';
+                    if (fileId != null) feature.properties.wsifileId = fileId;
+                    const objectId = d.data?.userdata?.object_id;
+                    if (objectId) {
+                        feature.id = objectId;
+                        feature.properties = {
+                            ...(feature.properties || {}),
+                            userdata: {
+                                ...((feature.properties && feature.properties.userdata) || {}),
+                                ...(d.data?.userdata || {}),
+                                object_id: objectId,
+                                layer_id: layerId || d.data?.userdata?.layer_id,
+                                layer_label: userdata.layer_label,
+                            },
+                        };
+                    }
+                    return feature;
+                }).filter(feature => isCompleteAnnotationGeometry(feature.geometry)),
                 properties:{
+                    ...grp.data.annotationProperties,
+                    ...(fileId != null ? {wsifileId: fileId} : {}),
                     defaultStyle: grp.defaultStyle.toJSON(),
-                    userdata: grp.data.userdata,
+                    userdata,
                 },
                 label:grp.displayName,
             }
@@ -705,13 +747,45 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         geoJSON.forEach(obj=>{
             if(obj.type=='FeatureCollection'){
                 let group = this._createFeatureCollectionGroup({label: obj.label, parent: parentLayer});
+                if (!group) return;
                 let props = (obj.properties || {});
-                group.data.userdata = Object.assign({},props.userdata);
-                group.defaultStyle.set(props.defaultStyle);
-                obj.features.forEach(feature=>{
-                    let item = paper.Item.fromGeoJSON(feature);
-                    group.addChild(item);
-                })
+                group.data.userdata = Object.assign({}, props.userdata);
+                group.data.userdata.layer_id ||= obj.id;
+                group.data.userdata.layer_label = obj.label || group.data.userdata.layer_label || 'Annotation Group';
+                try {
+                    group.defaultStyle.set(props.defaultStyle || {});
+                } catch {
+                    // Keep group even if style payload is incomplete.
+                }
+                (obj.features || []).forEach((feature) => {
+                    try {
+                        const item = paper.Item.fromGeoJSON(feature);
+                        if (!item) return;
+                        if (!item.data) item.data = {};
+                        if (feature?.properties?.userdata) {
+                            item.data.userdata = {
+                                ...(item.data.userdata || {}),
+                                ...feature.properties.userdata,
+                            };
+                        }
+                        item.data.userdata = {
+                            ...(item.data.userdata || {}),
+                            object_id: item.data.userdata?.object_id || feature.id || feature.properties?.id,
+                            layer_id: group.data.userdata.layer_id,
+                            layer_label: group.data.userdata.layer_label,
+                        };
+                        // Remote/live features must stay unselected so GeoJS paints them.
+                        try {
+                            item.selected = false;
+                            item.deselect?.();
+                        } catch {
+                            // Optional.
+                        }
+                        group.addChild(item);
+                    } catch (error) {
+                        console.warn('GeoJSON feature not loaded:', error);
+                    }
+                });
             }
             else{
                 console.warn('GeoJSON object not loaded: wrong type. Only FeatureCollection objects are currently supported');
@@ -746,6 +820,10 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         let displayLabel = opts.label;
         
         let parent = opts.parent;
+        const fileId = this.options?.annotationCollection?.fileId;
+        const collectionImage = fileId == null ? null : this.viewer.world._items.find(image =>
+            String(image.wsvvFileId ?? image.source?.file_id) === String(fileId));
+        if (!parent && collectionImage) parent = collectionImage._paperLayerMap?.get(this.paperScope) || collectionImage.paperLayer;
         if(!parent) {
             let numItems = this.viewer.world._items.length;
             
@@ -765,10 +843,14 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         }
 
         let grp = new paper.Group();
-        this._addFeatureCollectionGroupToLayer(grp, parent);
-        let grpNum = this.getFeatureCollectionGroups().length;
+        let grpNum = this.getFeatureCollectionGroups().length + 1;
         grp.name = grp.displayName = displayLabel!==null ? displayLabel : `Annotation Group ${grpNum}`;
         grp.defaultStyle = new paper.Style(this.paperScope.project.defaultStyle);
+        grp.data.userdata = {layer_id: newAnnotationId(), layer_label: String(grp.displayName)};
+        const collection = this.options?.annotationCollection;
+        if (collection) grp.data.annotationProperties = {annotation_set_id: collection.id, annotation_set_name: collection.name,
+            ...(collection.fileId != null ? {wsifileId: collection.fileId} : {})};
+        this._addFeatureCollectionGroupToLayer(grp, parent);
         return grp;
     }
 
@@ -789,7 +871,10 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
      */
     _ensureNewItemForTool(style) {
         const groups = this.getFeatureCollectionGroups();
-        const fcGroup = groups.length > 0 ? groups[0] : this._createFeatureCollectionGroup();
+        const collectionId = this.options?.annotationCollection?.id;
+        const filter = this.options?.annotationCollectionFilter ?? collectionId;
+        const available = filter == null ? groups : groups.filter(group => (group.data?.annotationProperties?.annotation_set_id || '') === filter);
+        const fcGroup = available[0] || this._createFeatureCollectionGroup();
         if (!fcGroup) return;
         // Ensure a visible default style for headless use when no explicit style is provided.
         // Use the feature collection's defaultStyle if available; otherwise fall back to toolkit defaultStyle.
@@ -807,7 +892,43 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
      * @param {Object} style - options (e.g strokeColor) to pass to the paper item
      */
     makePlaceholderItem(style){
-        return new Placeholder(style);
+        const placeholder = new Placeholder(style);
+        placeholder.paperItem.data.userdata = {object_id: newAnnotationId()};
+        return placeholder;
+    }
+
+    isLocalEditingItem(item) {
+        if (item && this._dataStoreCompletion?.item === item) return true;
+        const tool = this.paperScope?.getActiveTool?.();
+        if (!item || !tool?.isActive?.()) return false;
+        if (tool.itemToCreate === item) return true;
+        return tool.item === item && (tool._pointerDown || tool.mode === 'creating'
+            || String(tool.mode || '').endsWith('-drag') || tool.dragging || tool.creating);
+    }
+
+    getLocalEditingItems() {
+        return (this.getFeatures?.() || []).filter(item => this.isLocalEditingItem(item));
+    }
+
+    removeAnnotationCollection(collectionId, layerIds = []) {
+        const ids = new Set(layerIds);
+        const groups = (this.getFeatureCollectionGroups?.() || []).filter(group =>
+            group.data?.annotationProperties?.annotation_set_id === collectionId || ids.has(group.data?.userdata?.layer_id));
+        if (!groups.length) return;
+        this.suppressDataStoreSync(() => {
+            if (groups.some(group => (group.descendants || []).some(item => this.isLocalEditingItem(item) || item.selected))) {
+                this.getTool?.('default')?.activate();
+                this._dataStoreCompletion = null;
+            }
+            for (const group of groups) group.remove();
+        });
+        this.projectFromDataStore({force: true});
+    }
+
+    finishDrawingItem(item, tool) {
+        if (!this.geojsDisplay || !item?.parent || tool !== this.paperScope.getActiveTool?.()) return;
+        this._dataStoreCompletion = {item, tool};
+        this._scheduleDataStoreSync('item-created', {item, tool});
     }
 
     _bindDataStoreProjection() {
@@ -816,10 +937,21 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         this._syncProjectFromDataStoreState(this.dataStore.state);
     }
 
-    _syncProjectFromDataStoreState(state) {
+    /**
+     * Force Paper (+ GeoJS, if enabled) to match the current annotation data store.
+     * Used by live-session sagas when a backend session_tree arrives.
+     */
+    projectFromDataStore({force = false} = {}) {
+        if (!this.dataStore) return false;
+        if (force) this._dataStoreProjectionVersion = null;
+        this._syncProjectFromDataStoreState(this.dataStore.state, {force});
+        return true;
+    }
+
+    _syncProjectFromDataStoreState(state, {force = false} = {}) {
         if (!this.dataStore?.reduxEnabled || !state) return;
         const version = Number(state.version || 0);
-        if (this._dataStoreProjectionVersion === version) return;
+        if (!force && this._dataStoreProjectionVersion === version) return;
         this._dataStoreProjectionVersion = version;
 
         const storeOnlyActions = new Set([
@@ -827,7 +959,13 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
             annotationDataActionTypes.SET_CACHE,
             annotationDataActionTypes.CLEAR_CACHE,
         ]);
-        if (storeOnlyActions.has(state.lastAction)) return;
+        // Live-session sagas pass force=true so session_tree loads still paint
+        // even if a Paper→store sync was the last Redux action.
+        if (!force && storeOnlyActions.has(state.lastAction)) return;
+        // Remote live-session Redux updates are painted by the saga projector with
+        // soft upserts. A full wipe here races local creates (flash then revert).
+        const source = state.lastMeta?.source;
+        if (!force && (source === 'liveSessionRemote' || source === 'slideSessionRemote')) return;
 
         this._replaceProjectFeatureCollectionsFromDataStore(state.featureCollections || []);
     }
@@ -835,16 +973,92 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
     _replaceProjectFeatureCollectionsFromDataStore(featureCollections) {
         this._projectingDataStore = true;
         try {
-            this.loadGeoJSON(featureCollections, true, undefined, {
-                skipDataStore: true,
-                skipDataStoreSync: true,
-            });
+            this.paperScope.activate();
+            const isEmbeddingGroup = (group) => Boolean(
+                group?.data?.wsvvEmbeddingGrid
+                || group?.displayName === 'wsvv-embedding-grid'
+                || group?.name === 'wsvv-embedding-grid',
+            );
+            const isEmbeddingCollection = (collection) => Boolean(
+                collection?.properties?.wsvvEmbeddingGrid
+                || collection?.id === 'wsvv-embedding-grid'
+                || collection?.label === 'wsvv-embedding-grid',
+            );
+            const annotations = (featureCollections || []).filter((collection) => !isEmbeddingCollection(collection));
+            const groupId = group => String(group.data?.userdata?.layer_id || group.displayName || '');
+            const featureId = feature => String(feature?.properties?.userdata?.object_id || feature?.id || feature?.properties?.id || '');
+            const itemId = item => String(item.data?.userdata?.object_id || '');
+            const groups = (this.getFeatureCollectionGroups?.() || []).filter(group => !isEmbeddingGroup(group));
+            const byId = new Map(groups.map(group => [groupId(group), group]));
+            const wantedLayers = new Set();
+            const imageCount = this.viewer.world?.getItemCount?.() ?? this.viewer.world?._items?.length ?? 0;
+            // Never materialize image-pixel geometry into the viewport layer
+            // while slide loading is still racing the websocket session tree.
+            if (annotations.length && !imageCount) return;
+            for (const collection of annotations) {
+                const id = String(collection.properties?.userdata?.layer_id || collection.id || collection.label || '');
+                wantedLayers.add(id);
+                let group = byId.get(id);
+                const fileId = collection.properties?.wsifileId ?? collection.features?.[0]?.properties?.wsifileId;
+                const image = fileId == null ? null : this.viewer.world?._items?.find(image => String(image.wsvvFileId ?? image.source?.file_id) === String(fileId));
+                const imageLayer = image?._paperLayerMap?.get(this.paperScope) || image?.paperLayer;
+                if (fileId != null && !imageLayer) continue;
+                if (!group) {
+                    group = this._createFeatureCollectionGroup({label: collection.label, parent: imageLayer});
+                    if (!group) continue;
+                }
+                if (imageLayer && group.parent !== imageLayer) imageLayer.addChild(group);
+                group.data.userdata = {...(collection.properties?.userdata || {}), layer_id: id, layer_label: collection.label};
+                group.data.annotationProperties = {...collection.properties};
+                group.visible = collection.properties?.hidden !== true;
+                if (String(group.displayName) !== String(collection.label)) group.displayName = collection.label;
+                group.defaultStyle?.set(collection.properties?.defaultStyle || {});
+                const existing = new Map((group.descendants || []).filter(item => item.annotationItem).map(item => [itemId(item), item]));
+                const wantedFeatures = new Set();
+                for (const feature of collection.features || []) {
+                    const objectId = featureId(feature);
+                    wantedFeatures.add(objectId);
+                    const item = existing.get(objectId);
+                    if (item && this.isLocalEditingItem(item)) continue;
+                    if (!isCompleteAnnotationGeometry(feature.geometry)) continue;
+                    const sameGeometry = item && JSON.stringify(item.annotationItem.toGeoJSONGeometry()) === JSON.stringify(feature.geometry);
+                    if (sameGeometry) {
+                        item.data.userdata = {...(feature.properties?.userdata || {}), object_id: objectId, layer_id: id};
+                        if (String(item.displayName) !== String(feature.properties?.label)) item.displayName = feature.properties?.label;
+                        item.annotationItem.setStyle(feature.properties || {});
+                    } else {
+                        const next = paper.Item.fromGeoJSON(feature);
+                        if (!next) continue;
+                        next.data.userdata = {...(feature.properties?.userdata || {}), object_id: objectId, layer_id: id};
+                        if (item) item.replaceWith(next);
+                        else {
+                            next.selected = false;
+                            group.addChild(next);
+                        }
+                    }
+                }
+                for (const [id, item] of existing) {
+                    if (!wantedFeatures.has(id) && !this.isLocalEditingItem(item)) item.remove();
+                }
+            }
+            for (const group of groups) {
+                if (!wantedLayers.has(groupId(group)) && !(group.descendants || []).some(item => this.isLocalEditingItem(item))) group.remove();
+            }
             this.overlay.rescaleItems();
-            this.geojsDisplay?.syncFromStore?.();
-            this.geojsDisplay?.scheduleUpdate?.();
-            this.paperScope?.view?.update?.();
+        } catch (error) {
+            console.error('Failed projecting annotation store onto Paper:', error);
         } finally {
+            try {
+                refreshMeasurementDisplay(this);
+                this.geojsDisplay?.syncFromStore?.({refreshPaperItems: true});
+                this.geojsDisplay?.requestViewportUpdate?.({force: true});
+                this.geojsDisplay?.scheduleUpdate?.();
+                this.paperScope?.view?.update?.();
+            } catch {
+                // GeoJS refresh is best-effort after projection.
+            }
             this._projectingDataStore = false;
+            this.paperScope?.project?.emit('items-changed', {source: 'liveSessionRemote'});
         }
     }
 
@@ -863,16 +1077,85 @@ class AnnotationToolkit extends OpenSeadragon.EventSource{
         });
     }
 
+    /**
+     * Prevent Paper→Redux snapshots while materializing remote live-session trees.
+     * Without this, item-created / feature-collection-added from soft upserts replace
+     * the Redux SoT with a partial Paper project and GeoJS drops unsynced peers' objects.
+     */
+    suppressDataStoreSync(fn) {
+        this._suppressDataStoreSyncDepth = (this._suppressDataStoreSyncDepth || 0) + 1;
+        // Suppress projection events without cancelling a queued local commit.
+        try {
+            return typeof fn === 'function' ? fn() : undefined;
+        } finally {
+            this._suppressDataStoreSyncDepth = Math.max(0, (this._suppressDataStoreSyncDepth || 1) - 1);
+        }
+    }
+
     _scheduleDataStoreSync(reason, event = {}) {
         const item = event?.item;
-        if (this._projectingDataStore || item?.data?.wsvvEmbeddingGrid || item?.data?.wsvvLazyGeoJSPaperItem || event?.source === 'render_annotations') {
+        if (
+            this._projectingDataStore
+            || (this._suppressDataStoreSyncDepth || 0) > 0
+            || item?.data?.wsvvEmbeddingGrid
+            || item?.data?.wsvvLazyGeoJSPaperItem
+            || event?.source === 'render_annotations'
+            || event?.source === 'slideSessionRemote'
+            || event?.source === 'liveSessionRemote'
+            || event?.source === 'update_colors'
+            || event?.source === 'update_grid_line_style'
+        ) {
             return;
         }
-        if (!this.dataStore || this._dataStoreSyncPending) return;
+        if (!this.dataStore) return;
+        if (reason === 'item-created' && event.tool && !event.tool._pointerDown && this.geojsDisplay) {
+            this._dataStoreCompletion = {item: event.item, tool: event.tool};
+        }
+        if (reason === 'item-removed' && item) {
+            const id = item.data?.userdata?.object_id;
+            const layerId = item.data?.userdata?.layer_id;
+            if (item.isGeoJSONFeatureCollection && layerId) {
+                (this._dataStoreRemovedLayerIds ||= new Set()).add(layerId);
+            } else if (id) {
+                (this._dataStoreRemovedFeatureIds ||= new Set()).add(id);
+            }
+        }
+        // Coalesce bursts (multi-object layer delete) into one Paper→Redux snapshot
+        // after the current turn so the top-bar store matches removed items.
+        this._dataStoreSyncReason = reason || this._dataStoreSyncReason || 'items-changed';
+        if (this._dataStoreSyncPending) return;
         this._dataStoreSyncPending = true;
         const sync = () => {
             this._dataStoreSyncPending = false;
-            this.dataStore.syncFromToolkit(this, { source: reason });
+            if (this._projectingDataStore || (this._suppressDataStoreSyncDepth || 0) > 0) {
+                this._dataStoreSyncReason = null;
+                return;
+            }
+            const completion = this._dataStoreCompletion;
+            this._dataStoreCompletion = null;
+            const source = completion ? 'item-created' : (this._dataStoreSyncReason || reason);
+            this._dataStoreSyncReason = null;
+            const removedFeatureIds = [...(this._dataStoreRemovedFeatureIds || [])];
+            const removedLayerIds = [...(this._dataStoreRemovedLayerIds || [])];
+            this._dataStoreRemovedFeatureIds = null;
+            this._dataStoreRemovedLayerIds = null;
+            this.dataStore.syncFromToolkit(this, {source, removedFeatureIds, removedLayerIds});
+            if (completion?.item?.parent && completion.tool === this.paperScope.getActiveTool?.()) {
+                const {item, tool} = completion;
+                tool._createdItemToComplete = null;
+                const parent = item.parent;
+                this.suppressDataStoreSync(() => {
+                    item.deselect?.(true);
+                    const placeholder = this.makePlaceholderItem(item.annotationItem.getStyleProperties());
+                    if (!isCompleteAnnotationGeometry(item.annotationItem.toGeoJSONGeometry())) item.remove();
+                    parent.addChild(placeholder.paperItem);
+                    placeholder.paperItem.select();
+                    tool.selectionChanged();
+                });
+                this.geojsDisplay?.syncFromStore();
+                this.geojsDisplay?._syncPaperSelectionState();
+                this.geojsDisplay?.requestViewportUpdate({force: true});
+            }
         };
         if (typeof queueMicrotask === 'function') {
             queueMicrotask(sync);

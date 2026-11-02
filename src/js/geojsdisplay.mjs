@@ -1,8 +1,9 @@
 import { OpenSeadragon } from './osd-loader.mjs';
-import { debugDuration, debugLog, debugLogJson, debugNow } from '../../../helpers/debugLog.js';
+import { debugDuration, debugLog, debugLogJson, debugNow, isDebugEnabled } from '../../../helpers/debugLog.js';
 import { normalizeEmbeddingId } from '../../../helpers/embeddingIds.js';
 import { geo, map as GeoMap, util as geoUtil } from './geojs-loader.mjs';
 import { displayBoundsFromBounds } from './geojs-selection-helpers.mjs';
+import { normalizePointTextStyle, POINT_TEXT_MARKER_RADIUS, pointTextOffsetForMatrix } from './utils/pointTextStyle.mjs';
 
 const GEOJS_DISPLAY_Z_INDEX = '20';
 const PAPER_OVERLAY_Z_INDEX = '30';
@@ -17,11 +18,11 @@ const DEFAULT_DISPLAY_OPTIONS = Object.freeze({
     renderer: 'webgl',
     hidePaperItems: true,
     editOn: 'click',
-    pointRadius: 5,
+    pointRadius: 9,
     lineWidth: 0.75,
     fillOpacity: 0,
     strokeOpacity: 1,
-    selectedPointRadius: 7,
+    selectedPointRadius: 10,
     selectedLineWidth: 1.5,
     selectedStrokeColor: '#60a5fa',
     selectedStrokeOpacity: 1,
@@ -106,9 +107,13 @@ function flattenFeatureCollections(featureCollections = []) {
     let globalFeatureIndex = 0;
     featureCollections.forEach((collection, collectionIndex) => {
         (collection.features || []).forEach((feature, featureIndex) => {
-            const id = feature.id
+            // Live-session peers stamp userdata.object_id; prefer it so GeoJS rows
+            // match Paper keys and visibility handoff works across clients.
+            const id = feature.properties?.userdata?.object_id
+                ?? feature.id
                 ?? feature.properties?.id
-                ?? `${collection.label || collectionIndex}:${feature.properties?.label || featureIndex}`;
+                ?? feature.properties?.userdata?.id
+                ?? `${collection.id || collection.label || collectionIndex}:${featureIndex}:${feature.properties?.label || 'feature'}`;
             rows.push({
                 id,
                 collectionIndex,
@@ -188,7 +193,9 @@ function pointSubtypePolygon(geom) {
 }
 
 function paperFeatureKey(item, fallbackIndex) {
-    return item?.annotationItem?.toGeoJSONFeature?.()?.id
+    // Live sessions stamp userdata.object_id; prefer it so GeoJS rows match Paper.
+    return item?.data?.userdata?.object_id
+        ?? item?.annotationItem?.toGeoJSONFeature?.()?.id
         ?? item?.data?.userdata?.id
         ?? item?.embedding_id
         ?? item?.displayName
@@ -253,12 +260,21 @@ function paperItemToFeature(item, id) {
     try {
         const feature = item?.annotationItem?.toGeoJSONFeature?.();
         if (feature) {
+            const objectId = item?.data?.userdata?.object_id
+                ?? feature.properties?.userdata?.object_id
+                ?? feature.id
+                ?? id;
             return {
                 ...feature,
-                id: feature.id ?? id,
+                id: objectId,
                 properties: {
                     ...(feature.properties || {}),
-                    id: feature.properties?.id ?? feature.id ?? id,
+                    id: feature.properties?.id ?? objectId,
+                    userdata: {
+                        ...(feature.properties?.userdata || {}),
+                        ...(item?.data?.userdata || {}),
+                        object_id: objectId,
+                    },
                 },
             };
         }
@@ -270,6 +286,15 @@ function paperItemToFeature(item, id) {
 
 function geojsFeatureStyle(row, key, fallback) {
     const props = row.feature.properties || {};
+    if (key === 'strokeWidth') {
+        const logical = props.rescale?.strokeWidth ?? props.strokeWidth
+            ?? row.collection.properties?.defaultStyle?.strokeWidth;
+        return logical ?? fallback;
+    }
+    if (key === 'radius') {
+        const radius = props.radius ?? row.collection.properties?.defaultStyle?.radius;
+        return radius ?? fallback;
+    }
     return props[key] ?? row.collection.properties?.defaultStyle?.[key] ?? fallback;
 }
 
@@ -302,7 +327,9 @@ class GeoJSDisplay {
         this._paperItems = [];
         this._rowByPaperItem = new Map();
         this._rowById = new Map();
-        this._visibleFeatureIds = new Set();
+        // null = all features visible. An empty Set would hide every row until the
+        // first _refreshVisibleFeatureIds, which left live-session peers blank.
+        this._visibleFeatureIds = null;
         this._lastRenderedRowIds = new Set();
         this._storeRowsSignature = '';
         this._unsubscribeStore = null;
@@ -360,6 +387,8 @@ class GeoJSDisplay {
             this._map.deleteLayer(this._layer);
         }
         this._layer = null;
+        if (this._textLayer && this._map?.deleteLayer) this._map.deleteLayer(this._textLayer);
+        this._textLayer = null;
         if (this._ownsGeoJSMap) this._map?.exit?.();
         if (this._ownsGeoJSElement) this.element?.remove();
     }
@@ -367,6 +396,7 @@ class GeoJSDisplay {
     setVisible(visible) {
         if (this._usesSharedGeoJSMap) {
             this._layer?.visible?.(Boolean(visible));
+            this._textLayer?.visible?.(Boolean(visible));
             this._map?.draw?.();
         } else if (this.element) {
             this.element.style.display = visible ? '' : 'none';
@@ -379,12 +409,23 @@ class GeoJSDisplay {
         }
     }
 
-    syncFromStore() {
+    syncFromStore({refreshPaperItems = false} = {}) {
         const collections = this.toolkit.dataStore?.state?.featureCollections || [];
+        const embedding = collections.find(collection => collection.properties?.wsvvEmbeddingGrid || collection.id === 'wsvv-embedding-grid');
+        const embeddingChanged = this._storeEmbeddingCollection !== embedding;
+        this._storeEmbeddingCollection = embedding;
+        if (embeddingChanged && this.toolkit.dataStore?.reduxEnabled) {
+            this._embeddingRows = embedding ? flattenFeatureCollections([embedding]).map(row => ({...row, directEmbedding: true})) : [];
+            this.setEmbeddingSelectionState(this._selectedEmbeddingIds || [], embedding?.properties?.gridLineStyle || {}, {fromStore: true});
+        }
         const nextStoreRows = flattenFeatureCollections(collections)
+            .filter((row) => row.feature?.geometry?.type && row.feature.geometry.coordinates != null)
             .filter((row) => !row.collection?.properties?.wsvvEmbeddingGrid && row.collection?.id !== 'wsvv-embedding-grid');
         const nextSignature = this._storeRowsSignatureForRows(nextStoreRows);
-        if (nextSignature === this._storeRowsSignature) {
+        if (nextSignature === this._storeRowsSignature && !embeddingChanged) {
+            // Projection can replace Paper items after Redux listeners have
+            // already consumed this version. Reattach without changing store data.
+            if (refreshPaperItems) this._refreshFeatureRows();
             debugLog('geojs.display', 'sync-from-store-skipped', {
                 storeRows: nextStoreRows.length,
                 reason: 'unchanged-store-rows',
@@ -400,6 +441,11 @@ class GeoJSDisplay {
     }
 
     setEmbeddingFeatureCollection(collection) {
+        if (this.toolkit.dataStore?.reduxEnabled) {
+            if (collection) this.toolkit.dataStore.upsertFeatureCollection(collection, {id: 'wsvv-embedding-grid'}, {source: 'modelOutputRender'});
+            else this.toolkit.dataStore.removeFeatureCollection({id: 'wsvv-embedding-grid'}, {source: 'clear_embedding_grid'});
+            return;
+        }
         this._embeddingRows = collection
             ? flattenFeatureCollections([collection]).map((row) => ({ ...row, directEmbedding: true }))
             : [];
@@ -407,6 +453,15 @@ class GeoJSDisplay {
     }
 
     setEmbeddingRows(rows) {
+        if (this.toolkit.dataStore?.reduxEnabled) {
+            const previous = this._storeEmbeddingCollection;
+            const collection = rows?.[0]?.collection || previous || {};
+            this.setEmbeddingFeatureCollection({...collection, type: 'FeatureCollection', id: 'wsvv-embedding-grid',
+                label: collection.label || 'WSI embedding grid', properties: {...previous?.properties, ...collection.properties,
+                    wsvvEmbeddingGrid: true,
+                    gridLineStyle: this._embeddingGridLineStyle}, features: (rows || []).map(row => row.feature)});
+            return;
+        }
         const started = debugNow();
         this._embeddingRows = Array.isArray(rows) ? rows : [];
         debugLog('geojs.display', 'set-embedding-rows', {
@@ -417,12 +472,24 @@ class GeoJSDisplay {
             rowCount: this._embeddingRows.length,
             featureRowCount: this._featureRows.length,
         });
+        this.paperScope?.project?.emit?.('embedding-rows-changed', {
+            rowCount: this._embeddingRows.length,
+        });
+    }
+
+    getEmbeddingRows() {
+        return Array.isArray(this._embeddingRows) ? this._embeddingRows : [];
     }
 
     clearEmbeddingFeatureCollection() {
+        if (this.toolkit.dataStore?.reduxEnabled) {
+            this.setEmbeddingFeatureCollection(null);
+            return;
+        }
         if (!this._embeddingRows.length) return;
         this._embeddingRows = [];
         this._refreshFeatureRows();
+        this.paperScope?.project?.emit?.('embedding-rows-changed', {rowCount: 0});
     }
 
     hasSelectableRows() {
@@ -435,15 +502,17 @@ class GeoJSDisplay {
         return normalized !== null && this._selectedEmbeddingIds.has(normalized);
     }
 
-    setEmbeddingSelectionState(selectedIds = [], gridLineStyle = {}) {
+    setEmbeddingSelectionState(selectedIds = [], gridLineStyle = {}, {fromStore = false} = {}) {
         const input = selectedIds instanceof Set ? Array.from(selectedIds) : (Array.isArray(selectedIds) ? selectedIds : [selectedIds]);
         const selected = new Set(input.map((id) => normalizeEmbeddingId(id)).filter((id) => id !== null));
-        const opacity = finiteNumber(gridLineStyle?.opacity, null);
-        const thickness = finiteNumber(gridLineStyle?.thickness, null);
+        const opacityValue = gridLineStyle?.opacity ?? gridLineStyle?.strokeOpacity;
+        const thicknessValue = gridLineStyle?.thickness ?? gridLineStyle?.strokeWidth;
+        const opacity = opacityValue == null ? null : finiteNumber(opacityValue, null);
+        const thickness = thicknessValue == null ? null : finiteNumber(thicknessValue, null);
         const style = {
             hide_unselected: Boolean(gridLineStyle?.hide_unselected),
-            strokeOpacity: opacity !== null ? opacity : null,
-            strokeWidth: thickness !== null ? thickness : null,
+            strokeOpacity: opacity,
+            strokeWidth: thickness,
         };
         const signature = Array.from(selected).sort().join('|')
             + ':hide=' + String(style.hide_unselected)
@@ -451,12 +520,18 @@ class GeoJSDisplay {
             + ':width=' + String(style.strokeWidth);
         if (signature === this._embeddingSelectionSignature) return;
 
+        const styleChanged = JSON.stringify(style) !== JSON.stringify(this._embeddingGridLineStyle);
         this._selectedEmbeddingIds = selected;
         this._embeddingGridLineStyle = style;
         this._embeddingSelectionSignature = signature;
         this._refreshVisibleFeatureIds();
         this._markRenderDataDirty();
         this.scheduleUpdate();
+        if (!fromStore && styleChanged && this.toolkit.dataStore?.reduxEnabled && this._storeEmbeddingCollection) {
+            const collection = this._storeEmbeddingCollection;
+            this.toolkit.dataStore.upsertFeatureCollection({...collection, properties: {...collection.properties,
+                gridLineStyle: style}}, {id: collection.id}, {source: 'modelOutputStyle'});
+        }
         debugLog('geojs.display', 'embedding-selection-state', {
             selectedCount: this._selectedEmbeddingIds.size,
             hideUnselected: this._embeddingGridLineStyle.hide_unselected,
@@ -467,6 +542,21 @@ class GeoJSDisplay {
     }
 
     updateEmbeddingRowStyles(updates = []) {
+        if (this.toolkit.dataStore?.reduxEnabled && this._storeEmbeddingCollection) {
+            const byId = new Map(updates.map(update => [normalizeEmbeddingId(update.id), update]));
+            let changed = false;
+            const collection = this._storeEmbeddingCollection;
+            const features = collection.features.map(feature => {
+                const update = byId.get(normalizeEmbeddingId(feature.id));
+                if (!update) return feature;
+                const {id, ...patch} = update;
+                if (!Object.keys(patch).some(key => feature.properties?.[key] !== patch[key])) return feature;
+                changed = true;
+                return {...feature, properties: {...feature.properties, ...patch}};
+            });
+            if (changed) this.toolkit.dataStore.upsertFeatureCollection({...collection, features}, {id: collection.id}, {source: 'modelOutputStyle'});
+            return;
+        }
         const rows = Array.isArray(updates) ? updates : [];
         if (!rows.length || !this._embeddingRows.length) return;
         const updateById = new Map();
@@ -500,6 +590,20 @@ class GeoJSDisplay {
         });
     }
 
+    setEmbeddingPresence(peers = [], ownColor = null) {
+        const signature = JSON.stringify([peers, ownColor]);
+        if (signature === this._embeddingPresenceSignature) return;
+        this._embeddingPresenceSignature = signature;
+        this._embeddingOwnColor = ownColor;
+        this._peerSelectionColors = new Map();
+        for (const peer of peers) for (const id of peer.selectedIds || []) {
+            if (!this._peerSelectionColors.has(String(id))) this._peerSelectionColors.set(String(id), peer.color);
+        }
+        this._refreshVisibleFeatureIds();
+        this._markRenderDataDirty();
+        this.scheduleUpdate();
+    }
+
     _refreshFeatureRows() {
         const started = debugNow();
         const initialStoreRows = this._storeRows.length;
@@ -507,6 +611,20 @@ class GeoJSDisplay {
 
         const tiledStarted = debugNow();
         this._refreshTiledImageCache();
+        if (this._storeEmbeddingCollection) {
+            this._embeddingRows = flattenFeatureCollections([this._storeEmbeddingCollection]).map(row => {
+                const props = row.feature.properties || {};
+                if (!props.geojsSourceImage || !props.geojsImageBounds) return {...row, directEmbedding: true};
+                const {left, top, width, height} = props.geojsImageBounds;
+                const first = this._tiledImagePointToImage(row, {x: left, y: top});
+                const last = this._tiledImagePointToImage(row, {x: left + width, y: top + height});
+                const bounds = {minX: first?.x ?? left, minY: first?.y ?? top,
+                    maxX: last?.x ?? left + width, maxY: last?.y ?? top + height};
+                return {...row, directEmbedding: true, feature: {...row.feature,
+                    geometry: {...row.feature.geometry, coordinates: [(bounds.minX + bounds.maxX) / 2, (bounds.minY + bounds.maxY) / 2]},
+                    properties: {...props, geojsLayoutBounds: bounds}}, _geojsDisplayCullingBounds: bounds};
+            });
+        }
         const tiledMs = debugNow() - tiledStarted;
 
         const rows = this._storeRows.length ? [...this._storeRows, ...this._embeddingRows] : this._embeddingRows;
@@ -523,7 +641,8 @@ class GeoJSDisplay {
         }
 
         const appendStarted = debugNow();
-        this._featureRows = paperItems.length ? this._appendLivePaperRows(rows, paperItems) : rows;
+        this._featureRows = paperItems.length && !this.toolkit.dataStore?.reduxEnabled
+            ? this._appendLivePaperRows(rows, paperItems) : rows;
         const appendMs = debugNow() - appendStarted;
 
         const indexStarted = debugNow();
@@ -614,7 +733,9 @@ class GeoJSDisplay {
         if (this._usesDisplayCoordinates()) {
             this._markRenderGeometryDirty();
         }
-        if (!this.options.immediateViewportUpdates) {
+        // Applying one remote camera requires zoom + pan (+ rotation) calls.
+        // Draw their final state once, rather than each intermediate camera.
+        if (this.viewer.__slideSessionApplyingViewport || !this.options.immediateViewportUpdates) {
             this.scheduleUpdate();
             return;
         }
@@ -646,8 +767,20 @@ class GeoJSDisplay {
     update() {
         if (this.destroyed || this._isUpdating) return;
         const debugStarted = debugNow();
+        const debugEnabled = isDebugEnabled('geojs.display');
         this._isUpdating = true;
         try {
+        if (this._layoutCoordinateGeneration !== 1) {
+            this._layoutCoordinateGeneration = 1;
+            this._markRenderDataDirty();
+            this._featureRows.forEach((row) => {
+                if (!row?.feature?.properties?.geojsLayoutBounds) {
+                    row._geojsCullingSpace = null;
+                    row._geojsDisplayCullingBounds = undefined;
+                }
+            });
+            this._rebuildSpatialIndex();
+        }
         const { width, height } = getViewerSize(this.viewer);
         const contentSize = this._mapContentSize(width, height);
         if (this._width !== width || this._height !== height) {
@@ -676,6 +809,9 @@ class GeoJSDisplay {
         }
 
         this._syncMapViewport(width, height);
+        if (this._spatialIndex && this._spatialIndexSpace !== 'layout-annotations') {
+            this._rebuildSpatialIndex();
+        }
         this._beginDisplayFrame();
 
         const mapBoundsFlat = summarizeBounds(this._lastMapBounds);
@@ -709,7 +845,10 @@ class GeoJSDisplay {
         const renderPreparation = this._prepareRowsForGeoJSRender(rows, { forceOverview: overviewBeforeCull });
         const rowsForGeoJS = renderPreparation.rows;
         const prepareMs = debugNow() - prepareStarted;
-        this._lastRenderedRowIds = new Set(rows.map((row) => row.id));
+        if (rows !== this._lastRenderedRows) {
+            this._lastRenderedRows = rows;
+            this._lastRenderedRowIds = new Set(rows.map((row) => row.id));
+        }
         debugLog('geojs.display', 'update-rows-prepared', {
             candidateRows: candidateRows.length,
             visibleRows: rows.length,
@@ -719,7 +858,7 @@ class GeoJSDisplay {
             aggregatedRows: renderPreparation.aggregatedRows || 0,
             aggregatedSourceRows: renderPreparation.aggregatedSourceRows || 0,
             selectedRows: this._selectedEmbeddingIds?.size || 0,
-            selectedRowsInRender: rows.reduce((count, row) => count + (this._rowIsSelected(row) ? 1 : 0), 0),
+            selectedRowsInRender: debugEnabled ? rows.reduce((count, row) => count + (this._rowIsSelected(row) ? 1 : 0), 0) : null,
             cullMs: Number(cullMs.toFixed(2)),
             prepareMs: Number(prepareMs.toFixed(2)),
         });
@@ -750,7 +889,7 @@ class GeoJSDisplay {
             const pointStarted = debugNow();
             const pointRows = this._pointRows(rowsForGeoJS);
             const pointRowsMs = debugNow() - pointStarted;
-            const pointBoundsFlat = this._pointRowsBounds(pointRows);
+            const pointBoundsFlat = debugEnabled ? this._pointRowsBounds(pointRows) : null;
             debugLog('geojs.display', 'update-point-rows-built', {
                 pointRows: pointRows.length,
                 durationMs: Number(pointRowsMs.toFixed(2)),
@@ -792,6 +931,7 @@ class GeoJSDisplay {
             const lineDataMs = debugNow() - lineDataStarted;
             const polygonDataStarted = debugNow();
             this._polygonFeature.data(polygonRows);
+            this._textFeature?.data(this._textRows(rowsForGeoJS));
             const polygonDataMs = debugNow() - polygonDataStarted;
             const dataMs = debugNow() - dataStarted;
             debugLog('geojs.display', 'update-feature-data-complete', {
@@ -823,6 +963,8 @@ class GeoJSDisplay {
             renderMode: renderPreparation.mode,
         });
         this._map.draw();
+        // GeoJS may recreate layer canvases on draw; keep Paper above the tile stack.
+        this._raisePaperOverlaysAboveGeoJS();
         const drawMs = debugNow() - drawStarted;
         const paperVisibilityStarted = debugNow();
         this._syncPaperVisibilityForSelection();
@@ -873,7 +1015,8 @@ class GeoJSDisplay {
             });
             this._raisePaperOverlaysAboveGeoJS();
             this._layer = this._map.createLayer('feature', {
-                renderer: this.options.renderer,
+                renderer: this._annotationFeatureRenderer(),
+                autoshareRenderer: false,
                 features: ['point', 'line', 'polygon'],
                 zIndex: 100,
             });
@@ -922,18 +1065,52 @@ class GeoJSDisplay {
             center: { x: contentSize.width / 2, y: contentSize.height / 2 },
         });
         this._layer = this._map.createLayer('feature', {
-            renderer: this.options.renderer,
+            renderer: this._annotationFeatureRenderer(),
+            autoshareRenderer: false,
             features: ['point', 'line', 'polygon'],
         });
     }
 
     _raisePaperOverlaysAboveGeoJS() {
-        const overlays = this.viewer.PaperOverlays || [];
+        const host = this.viewer?.canvas;
+        const overlays = this.viewer?.PaperOverlays || [];
+        if (!host) return;
         overlays.forEach((overlay) => {
             if (!overlay?._canvasdiv) return;
-            overlay._canvasdiv.style.zIndex = PAPER_OVERLAY_Z_INDEX;
-            this.viewer.canvas.appendChild(overlay._canvasdiv);
+            const node = overlay._canvasdiv;
+            node.style.position = 'absolute';
+            node.style.left = '0';
+            node.style.top = '0';
+            node.style.right = '0';
+            node.style.bottom = '0';
+            node.style.width = '100%';
+            node.style.height = '100%';
+            // Sit above GeoJS tile/feature canvases (zIndex 100 within the map node).
+            node.style.zIndex = '200';
+            const pointerEvents = this.viewer?.isMouseNavEnabled?.() ? 'none' : 'auto';
+            node.style.pointerEvents = pointerEvents;
+            if (overlay._canvas) {
+                overlay._canvas.style.display = 'block';
+                overlay._canvas.style.pointerEvents = pointerEvents;
+            }
+            host.appendChild(node);
         });
+    }
+
+    _annotationFeatureRenderer() {
+        // WebGL feature layers are unreliable on some mobile browsers; canvas keeps
+        // strokes visible alongside the shared tile map.
+        try {
+            if (typeof window !== 'undefined') {
+                if (window.matchMedia?.('(pointer: coarse)').matches) return 'canvas';
+                if (navigator.maxTouchPoints > 0 && window.matchMedia?.('(max-width: 900px)').matches) {
+                    return 'canvas';
+                }
+            }
+        } catch {
+            // Fall through to the configured renderer.
+        }
+        return this.options.renderer || 'webgl';
     }
 
     _createGeoJSFeatures() {
@@ -968,6 +1145,18 @@ class GeoJSDisplay {
                 uniformPolygon: true,
             });
 
+        // GeoJS text uses its canvas renderer; keep polygons/points on WebGL.
+        // Both layers share the map and the same image/display coordinates.
+        this._textLayer = this._map.createLayer('feature', {renderer: 'canvas', features: ['text'], zIndex: 101});
+        this._textFeature = this._textLayer.createFeature('text', {selectionAPI: false})
+            .position(d => d.position)
+            .text(d => d.text)
+            .style({font: d => `${d.fontSize}px ${d.fontFamily}`, color: d => d.strokeColor,
+                textOpacity: d => d.strokeOpacity, textAlign: 'left', textBaseline: 'alphabetic',
+                offset: d => this._pointTextOffset(d.sourceRow),
+                rotation: () => this.viewer.isGeoJSTileViewer ? -Number(this.viewer._viewportRotation || 0) * Math.PI / 180 : 0,
+                textScaled: false, rotateWithMap: false, textStrokeWidth: 0});
+
         if (this.options.editOn === 'click') this._bindClickHitTesting();
     }
 
@@ -977,7 +1166,16 @@ class GeoJSDisplay {
         this.viewer.addHandler('viewport-change', viewportChangeHandler);
         this._viewerHandlers.push({ name: 'viewport-change', handler: viewportChangeHandler });
         ['animation', 'animation-finish', 'resize', 'rotate', 'flip'].forEach((name) => {
-            const handler = () => this.requestViewportUpdate();
+            const handler = () => {
+                if (name === 'resize') {
+                    // Pixel size changed even when image bounds did not.
+                    this._markRenderGeometryDirty();
+                    this.requestViewportUpdate({force: true});
+                    this._raisePaperOverlaysAboveGeoJS();
+                    return;
+                }
+                this.requestViewportUpdate();
+            };
             this.viewer.addHandler(name, handler);
             this._viewerHandlers.push({ name, handler });
         });
@@ -1014,11 +1212,15 @@ class GeoJSDisplay {
     hitTestRowsAtEvent(event) {
         const nativeEvent = event?.event || event?.original?.nativeEvent || event;
         if (!nativeEvent || nativeEvent.clientX == null || nativeEvent.clientY == null) return [];
-        const rect = this.viewer.canvas.getBoundingClientRect();
-        const display = {
-            x: nativeEvent.clientX - rect.left,
-            y: nativeEvent.clientY - rect.top,
-        };
+        const display = typeof this.viewer?.clientToCanvasLocal === 'function'
+            ? this.viewer.clientToCanvasLocal(nativeEvent)
+            : (() => {
+                const rect = this.viewer.canvas.getBoundingClientRect();
+                return {
+                    x: nativeEvent.clientX - rect.left,
+                    y: nativeEvent.clientY - rect.top,
+                };
+            })();
         return this.hitTestRowsAtDisplayPoint(display);
     }
 
@@ -1539,7 +1741,45 @@ class GeoJSDisplay {
         });
     }
 
+    _rowUsesViewportCulling(row) {
+        return Boolean(
+            row?.directEmbedding
+            || row?.directEmbeddingOverview
+            || row?.feature?.properties?.wsvvEmbeddingGrid
+        );
+    }
+
     _visibleRowsForRender(rows) {
+        // Image-space vertices remain valid while the camera moves. Keep a
+        // padded working set so nearby pans reuse both culling and GPU data.
+        if (this._spatialIndex && !this._usesDisplayCoordinates() && this.options.renderEmbeddingBoundaries) {
+            const viewport = this._currentImageViewportBounds(0);
+            const cached = this._viewportRowsCache;
+            const span = viewport ? viewport.maxX - viewport.minX : 0;
+            if (viewport && cached?.source === rows && cached.version === this._renderDataVersion
+                && span >= cached.span * 0.7 && span <= cached.span * 1.3
+                && viewport.minX >= cached.bounds.minX && viewport.maxX <= cached.bounds.maxX
+                && viewport.minY >= cached.bounds.minY && viewport.maxY <= cached.bounds.maxY) return cached.rows;
+            if (viewport) {
+                if (this._renderPartitions?.source !== rows) this._renderPartitions = {source: rows,
+                    pinned: rows.filter(row => !this._rowUsesViewportCulling(row))};
+                const margin = Math.max(0, finiteNumber(this.options.renderMargin, 0));
+                const padded = this._currentImageViewportBounds(margin) || viewport;
+                const padX = (viewport.maxX - viewport.minX) * 0.3;
+                const padY = (viewport.maxY - viewport.minY) * 0.3;
+                const bounds = {minX: padded.minX - padX, minY: padded.minY - padY,
+                    maxX: padded.maxX + padX, maxY: padded.maxY + padY};
+                const pinned = this._renderPartitions.pinned.filter(row => this._isFeatureIdVisible(row.id));
+                const indexed = this._querySpatialIndex(bounds).filter(row => this._rowUsesViewportCulling(row));
+                const visible = this._includeSelectedRows([...pinned, ...indexed]);
+                this._viewportRowsCache = {source: rows, version: this._renderDataVersion, span, bounds, rows: visible};
+                return visible;
+            }
+        }
+        const pinned = rows.filter((row) => !this._rowUsesViewportCulling(row));
+        const cullable = rows.filter((row) => this._rowUsesViewportCulling(row));
+        if (!cullable.length) return this._includeSelectedRows(pinned);
+
         const margin = Math.max(0, finiteNumber(this.options.renderMargin, 0));
         if (this._usesDisplayCoordinates()) {
             const viewport = {
@@ -1548,25 +1788,29 @@ class GeoJSDisplay {
                 maxX: this._width + margin,
                 maxY: this._height + margin,
             };
-            return this._includeSelectedRows(rows.filter((row) => {
+            const visible = cullable.filter((row) => {
                 const bounds = this._rowDisplayBounds(row);
                 if (!bounds) return true;
                 return this._boundsIntersect(bounds, viewport);
-            }));
+            });
+            return this._includeSelectedRows([...pinned, ...visible]);
         }
 
         const viewport = this._currentImageViewportBounds(margin);
         if (!viewport) return this._includeSelectedRows(rows);
         if (!this._spatialIndex) {
-            return this._includeSelectedRows(rows.filter((row) => {
+            const visible = cullable.filter((row) => {
                 const bounds = this._rowCullingBounds(row);
                 return !bounds || this._boundsIntersect(bounds, viewport);
-            }));
+            });
+            return this._includeSelectedRows([...pinned, ...visible]);
         }
-        return this._includeSelectedRows(this._querySpatialIndex(viewport));
+        const indexed = this._querySpatialIndex(viewport).filter((row) => this._rowUsesViewportCulling(row));
+        return this._includeSelectedRows([...pinned, ...indexed]);
     }
 
     _markRenderDataDirty() {
+        this._viewportRowsCache = null;
         this._renderDataDirty = true;
         this._renderRowsKey = null;
         this._renderDataVersion = (this._renderDataVersion || 0) + 1;
@@ -1575,6 +1819,7 @@ class GeoJSDisplay {
     }
 
     _markRenderGeometryDirty() {
+        this._viewportRowsCache = null;
         this._renderDataDirty = true;
         this._renderRowsKey = null;
         this._lastViewportRequestSignature = null;
@@ -1633,11 +1878,22 @@ class GeoJSDisplay {
     }
 
     _viewportSignature(width = this._width, height = this._height) {
+        const size = getViewerSize(this.viewer);
+        const w = Math.round(Number(width) || size.width || 0);
+        const h = Math.round(Number(height) || size.height || 0);
         if (this._usesDisplayCoordinates()) {
-            return 'display:' + Math.round(width) + 'x' + Math.round(height);
+            const viewport = this.viewer?.viewport;
+            const center = viewport?.getCenter?.(true);
+            const zoom = viewport?.getZoom?.(true);
+            const centerX = Number.isFinite(center?.x) ? center.x.toFixed(5) : '';
+            const centerY = Number.isFinite(center?.y) ? center.y.toFixed(5) : '';
+            const zoomText = Number.isFinite(zoom) ? Number(zoom).toFixed(5) : '';
+            return `display:${w}x${h}:${centerX},${centerY},${zoomText}`;
         }
+        // Include container size: sidebar chrome can change the map pixel size while
+        // image bounds stay identical — skipping redraw then drops annotations.
         const bounds = this._currentImageViewportBounds(0) || this._lastMapBounds;
-        return this._mapBoundsSignature(bounds);
+        return `${this._mapBoundsSignature(bounds) || 'bounds'}:${w}x${h}`;
     }
 
     _mapBoundsSignature(bounds) {
@@ -1692,7 +1948,7 @@ class GeoJSDisplay {
         if (!rows?.length) return '0';
         let hash = 2166136261;
         for (const row of rows) {
-            const text = String(row.collection?.id ?? row.collection?.label ?? '') + ':' + JSON.stringify(row.feature || {});
+            const text = String(row.collection?.id ?? row.collection?.label ?? '') + ':' + Boolean(row.collection?.properties?.hidden) + ':' + JSON.stringify(row.feature || {});
             for (let i = 0; i < text.length; i += 1) {
                 hash ^= text.charCodeAt(i);
                 hash = Math.imul(hash, 16777619) >>> 0;
@@ -1985,6 +2241,9 @@ class GeoJSDisplay {
     }
 
     _renderRowsSignature(rows) {
+        if (this._rowsSignatureCache?.rows === rows && this._rowsSignatureCache.version === this._renderDataVersion) {
+            return this._rowsSignatureCache.signature;
+        }
         if (rows.length > 50000) {
             return String(this._renderDataVersion) + ':' + String(rows.length) + ':' + String(this._visibleFeatureCount());
         }
@@ -1996,7 +2255,9 @@ class GeoJSDisplay {
                 hash = Math.imul(hash, 16777619) >>> 0;
             }
         }
-        return String(this._renderDataVersion) + ':' + String(rows.length) + ':' + String(this._visibleFeatureCount()) + ':' + String(hash);
+        const signature = String(this._renderDataVersion) + ':' + String(rows.length) + ':' + String(this._visibleFeatureCount()) + ':' + String(hash);
+        this._rowsSignatureCache = {rows, version: this._renderDataVersion, signature};
+        return signature;
     }
 
     _layoutUnionBounds() {
@@ -2152,7 +2413,12 @@ class GeoJSDisplay {
         const bins = new Map();
         const uncullable = [];
         let binReferences = 0;
+        this._spatialIndexSpace = 'layout-annotations';
         this._featureRows.forEach((row) => {
+            if (!this._rowUsesViewportCulling(row)) {
+                uncullable.push(row);
+                return;
+            }
             const bounds = this._rowCullingBounds(row);
             if (!bounds) {
                 uncullable.push(row);
@@ -2228,7 +2494,7 @@ class GeoJSDisplay {
     }
 
     _rowCullingBounds(row) {
-        if (row._geojsDisplayCullingBounds !== undefined) {
+        if (row._geojsDisplayCullingBounds !== undefined && row._geojsCullingSpace === 'layout') {
             return row._geojsDisplayCullingBounds;
         }
 
@@ -2241,6 +2507,7 @@ class GeoJSDisplay {
                 maxY: Number(layoutBounds.maxY ?? (Number(layoutBounds.top ?? layoutBounds.y) + Number(layoutBounds.height))),
             };
             if (Number.isFinite(bounds.minX) && Number.isFinite(bounds.minY) && Number.isFinite(bounds.maxX) && Number.isFinite(bounds.maxY)) {
+                row._geojsCullingSpace = 'layout';
                 row._geojsDisplayCullingBounds = bounds;
                 return bounds;
             }
@@ -2276,6 +2543,7 @@ class GeoJSDisplay {
             return null;
         }
 
+        row._geojsCullingSpace = 'layout';
         row._geojsDisplayCullingBounds = imagePoints.reduce((bounds, point) => ({
             minX: Math.min(bounds.minX, point.x),
             minY: Math.min(bounds.minY, point.y),
@@ -2379,14 +2647,45 @@ class GeoJSDisplay {
                 }];
             }
             const geom = row.feature.geometry || {};
-            if (geom.type !== 'Point' || geom.properties?.subtype || !Array.isArray(geom.coordinates) || geom.coordinates.length < 2) return [];
+            const pointText = geom.properties?.subtype?.toLowerCase() === 'pointtext';
+            if (geom.type !== 'Point' || (geom.properties?.subtype && !pointText) || !Array.isArray(geom.coordinates) || geom.coordinates.length < 2) return [];
+            const common = this._commonStyle(row);
+            // `properties.radius` is Paper's path radius in CSS pixels (stroke centered).
+            // GeoJS draws stroke outside the fill radius, so shrink fill radius by
+            // stroke/2 so the outer edge matches Paper/controller expectations.
+            const paperPathRadius = finiteNumber(
+                pointText ? POINT_TEXT_MARKER_RADIUS : geojsFeatureStyle(row, 'radius', this.options.pointRadius),
+                this.options.pointRadius,
+            );
+            const strokeW = finiteNumber(common.strokeWidth, 0);
+            const radius = Math.max(0.5, paperPathRadius - strokeW * 0.5);
             return [{
                 sourceRow: row,
                 position: this._featureCoordinateToMapGcs(row, coordinateToPoint(geom.coordinates)),
-                radius: this._rowIsSelected(row) ? this.options.selectedPointRadius : geojsFeatureStyle(row, 'radius', this.options.pointRadius),
-                ...this._commonStyle(row),
+                radius,
+                ...common,
             }];
         });
+    }
+
+    _textRows(rows) {
+        return rows.flatMap(row => {
+            const geometry = row.feature?.geometry;
+            if (geometry?.type !== 'Point' || geometry.properties?.subtype?.toLowerCase() !== 'pointtext'
+                || !Array.isArray(geometry.coordinates) || geometry.coordinates.length < 2) return [];
+            return [{sourceRow: row,
+                position: this._featureCoordinateToMapGcs(row, coordinateToPoint(geometry.coordinates)),
+                text: geometry.properties.content || 'PointText',
+                ...normalizePointTextStyle(row.feature.properties), ...this._commonStyle(row)}];
+        });
+    }
+
+    _pointTextOffset(row) {
+        const [x, y] = row.feature.geometry.coordinates;
+        const display = point => this._map.gcsToDisplay(this._featureCoordinateToMapGcs(row, point));
+        const origin = display({x, y}), right = display({x: x + 1, y}), down = display({x, y: y + 1});
+        return pointTextOffsetForMatrix({a: right.x - origin.x, b: right.y - origin.y,
+            c: down.x - origin.x, d: down.y - origin.y});
     }
 
     _lineRows(rows) {
@@ -2471,6 +2770,8 @@ class GeoJSDisplay {
 
     _commonStyle(row) {
         const selected = this._rowIsSelected(row);
+        const peerColor = row?.directEmbedding && this._peerSelectionColors?.get(String(this._embeddingRowId(row)));
+        const presenceColor = selected && row?.directEmbedding ? this._embeddingOwnColor : peerColor;
         const directEmbedding = Boolean(row?.directEmbedding && !row?.directEmbeddingOverview);
         const fillOpacity = finiteNumber(geojsFeatureStyle(row, 'fillOpacity', this.options.fillOpacity), this.options.fillOpacity);
         const styleStrokeOpacity = directEmbedding && this._embeddingGridLineStyle.strokeOpacity !== null
@@ -2481,16 +2782,27 @@ class GeoJSDisplay {
             ? this._embeddingGridLineStyle.strokeWidth
             : geojsFeatureStyle(row, 'strokeWidth', this.options.lineWidth);
         const rawStrokeWidth = finiteNumber(styleStrokeWidth, this.options.lineWidth);
-        const strokeWidth = row?.directEmbeddingOverview || directEmbedding
+        const markerCircle = row?.feature?.properties?.marker === 'circle'
+            || (row?.feature?.geometry?.type === 'Point' && !row?.feature?.geometry?.properties?.subtype);
+        // Use the feature's logical stroke width for live-session parity. Previously
+        // non-marker annotations were capped at options.lineWidth (0.75), so joiners
+        // saw much thinner/smaller objects than the controller.
+        const pointText = row?.feature?.geometry?.properties?.subtype?.toLowerCase() === 'pointtext';
+        const strokeWidth = pointText ? Math.max(0, rawStrokeWidth) : row?.directEmbeddingOverview || directEmbedding
             ? rawStrokeWidth
-            : Math.min(rawStrokeWidth, this.options.lineWidth);
-        const selectedDirectEmbedding = selected && directEmbedding;
-        const selectedPaperFeature = selected && !directEmbedding;
+            : markerCircle
+                ? Math.min(Math.max(rawStrokeWidth, 0.5), 8)
+                : Math.min(Math.max(rawStrokeWidth, 0.35), 12);
+        const selectedDirectEmbedding = (selected || Boolean(peerColor)) && directEmbedding;
+        const liveAnnotation = this._rowIsLiveSessionAnnotation(row);
+        // Live annotations keep the synced stroke width even when selected so
+        // controller/follower sizes stay identical.
+        const selectedPaperFeature = selected && !directEmbedding && !liveAnnotation;
         const selectedFeature = selectedPaperFeature || selectedDirectEmbedding;
         return {
             fillColor: colorToGeoJS(geojsFeatureStyle(row, 'fillColor', '#3b82f6'), '#3b82f6'),
-            fillOpacity: selected ? Math.max(fillOpacity, this.options.selectedFillOpacity) : fillOpacity,
-            strokeColor: selectedFeature ? colorToGeoJS(geojsFeatureStyle(row, 'selectedColor', this.options.selectedStrokeColor), '#60a5fa') : colorToGeoJS(geojsFeatureStyle(row, 'strokeColor', '#1f2937'), '#1f2937'),
+            fillOpacity: selected && !liveAnnotation ? Math.max(fillOpacity, this.options.selectedFillOpacity) : fillOpacity,
+            strokeColor: selectedFeature ? colorToGeoJS(presenceColor || geojsFeatureStyle(row, 'selectedColor', this.options.selectedStrokeColor), '#60a5fa') : colorToGeoJS(geojsFeatureStyle(row, 'strokeColor', '#1f2937'), '#1f2937'),
             strokeOpacity: selectedFeature ? Math.max(strokeOpacity, this.options.selectedStrokeOpacity) : strokeOpacity,
             strokeWidth: selectedFeature ? Math.max(strokeWidth, this.options.selectedLineWidth) : strokeWidth,
         };
@@ -2524,7 +2836,7 @@ class GeoJSDisplay {
         } else if (coordinateSpace === 'paper') {
             displayPoint = this._paperPointToDisplay(point);
         } else {
-            displayPoint = this._imagePointToDisplay(point);
+            displayPoint = this._imagePixelPointToDisplay(row, point);
         }
         cache.set(key, displayPoint);
         return displayPoint;
@@ -2538,7 +2850,12 @@ class GeoJSDisplay {
         if (coordinateSpace === 'paper') {
             return this._paperPointToImage(point);
         }
-        return point;
+        // Embeddings already store layout-space coordinates. Slide annotations are
+        // level-0 pixels of one image, while the map origin includes the label gap.
+        if (coordinateSpace === 'image' || row?.directEmbedding || row?.directEmbeddingOverview) {
+            return point;
+        }
+        return this._tiledImagePointToImage(row, point) || point;
     }
 
     _refreshTiledImageCache() {
@@ -2552,7 +2869,8 @@ class GeoJSDisplay {
         for (let i = 0; i < count; i += 1) {
             const item = world.getItemAt?.(i) ?? world._items?.[i];
             const itemFileId = finiteNumber(
-                item?.file?.id
+                item?.wsvvFileId
+                ?? item?.file?.id
                 ?? item?.source?.file?.id
                 ?? item?.source?.file_id
                 ?? item?.source?.fileId
@@ -2576,7 +2894,7 @@ class GeoJSDisplay {
             ?? row?.paperItem?.data?.wsifileId,
             null,
         );
-        return this._tiledImageForFileId(fileId);
+        return this._tiledImageForFileId(fileId) || row?.paperItem?.layer?.tiledImage || this._soleTiledImage();
     }
 
     _layoutBoundsForTiledImage(row, tiledImage) {
@@ -2617,7 +2935,7 @@ class GeoJSDisplay {
             };
         }
 
-        const viewportPoint = tiledImage?.imageToViewportCoordinates?.(Number(point.x || 0), Number(point.y || 0));
+        const viewportPoint = tiledImage?.imageToViewportCoordinates?.(Number(point.x || 0), Number(point.y || 0), true);
         const scaleBase = this._layoutScaleBase();
         if (viewportPoint && scaleBase) {
             return {
@@ -2674,10 +2992,10 @@ class GeoJSDisplay {
             return this._projectPointToDisplay(layer.matrix.transform(paperPoint));
         }
 
-        const viewportPoint = tiledImage?.imageToViewportCoordinates?.(Number(point.x || 0), Number(point.y || 0));
+        const viewportPoint = tiledImage?.imageToViewportCoordinates?.(Number(point.x || 0), Number(point.y || 0), true);
         let windowPoint = null;
         if (viewportPoint && this.viewer.viewport.viewportToWindowCoordinates) {
-            windowPoint = this.viewer.viewport.viewportToWindowCoordinates(viewportPoint);
+            windowPoint = this.viewer.viewport.viewportToWindowCoordinates(viewportPoint, true);
         } else if (viewportPoint && this.viewer.viewport.pixelFromPoint) {
             const pixelPoint = this.viewer.viewport.pixelFromPoint(viewportPoint, true);
             const viewerRect = this.viewer.canvas.getBoundingClientRect();
@@ -2710,6 +3028,59 @@ class GeoJSDisplay {
         };
     }
 
+    _soleTiledImage() {
+        const world = this.viewer?.world;
+        const count = Number(world?.getItemCount?.() ?? 0);
+        if (count !== 1) return null;
+        return world.getItemAt?.(0) || null;
+    }
+
+    _imagePixelPointToDisplay(row, point) {
+        const x = Number(point?.x);
+        const y = Number(point?.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return this._imagePointToDisplay(point);
+
+        const tiledImage = this._tiledImageForRow(row)
+            || row?.paperItem?.layer?.tiledImage
+            || this._soleTiledImage();
+        const viewportPoint = tiledImage?.imageToViewportCoordinates?.(x, y, true);
+        const overlayPoint = this._viewportPointToOverlay(viewportPoint);
+        if (overlayPoint) return overlayPoint;
+
+        const layout = this._layoutBoundsForTiledImage(row, tiledImage);
+        const sourceSize = tiledImage?.getContentSize?.();
+        const sourceWidth = finiteNumber(sourceSize?.x || tiledImage?.source?.width || layout?.width, null);
+        const sourceHeight = finiteNumber(sourceSize?.y || tiledImage?.source?.height || layout?.height, null);
+        if (layout && sourceWidth && sourceHeight) {
+            return this._imagePointToDisplay({
+                x: Number(layout.x || 0) + x * Number(layout.width || sourceWidth) / sourceWidth,
+                y: Number(layout.y || 0) + y * Number(layout.height || sourceHeight) / sourceHeight,
+            });
+        }
+        return this._imagePointToDisplay(point);
+    }
+
+    _viewportPointToOverlay(viewportPoint) {
+        if (!viewportPoint || !Number.isFinite(viewportPoint.x) || !Number.isFinite(viewportPoint.y)) return null;
+        let windowPoint = null;
+        if (this.viewer?.viewport?.viewportToWindowCoordinates) {
+            windowPoint = this.viewer.viewport.viewportToWindowCoordinates(viewportPoint, true);
+        } else if (this.viewer?.viewport?.pixelFromPoint) {
+            const pixelPoint = this.viewer.viewport.pixelFromPoint(viewportPoint, true);
+            const viewerRect = this.viewer.canvas.getBoundingClientRect();
+            windowPoint = {
+                x: viewerRect.left + pixelPoint.x,
+                y: viewerRect.top + pixelPoint.y,
+            };
+        }
+        if (!windowPoint || !Number.isFinite(windowPoint.x) || !Number.isFinite(windowPoint.y)) return null;
+        const overlayRect = this.element.getBoundingClientRect();
+        return {
+            x: windowPoint.x - overlayRect.left,
+            y: windowPoint.y - overlayRect.top,
+        };
+    }
+
     _imagePointToDisplay(point) {
         const scaleBase = this._layoutScaleBase();
         const viewportPoint = scaleBase
@@ -2717,7 +3088,7 @@ class GeoJSDisplay {
             : new OpenSeadragon.Point(point.x, point.y);
         let windowPoint = null;
         if (scaleBase && this.viewer.viewport.viewportToWindowCoordinates) {
-            windowPoint = this.viewer.viewport.viewportToWindowCoordinates(viewportPoint);
+            windowPoint = this.viewer.viewport.viewportToWindowCoordinates(viewportPoint, true);
         } else if (scaleBase && this.viewer.viewport.pixelFromPoint) {
             const pixelPoint = this.viewer.viewport.pixelFromPoint(viewportPoint, true);
             const viewerRect = this.viewer.canvas.getBoundingClientRect();
@@ -2835,11 +3206,44 @@ class GeoJSDisplay {
         const keyedItems = new Map();
         items.forEach((item, index) => {
             const key = paperFeatureKey(item, index);
-            if (key != null) keyedItems.set(key, item);
+            if (key != null && !keyedItems.has(key)) keyedItems.set(key, item);
         });
         rows.forEach((row) => {
-            const key = row.feature.id ?? row.feature.properties?.id ?? row.feature.properties?.label;
-            row.paperItem = (key != null ? keyedItems.get(key) : null) || null;
+            const key = row.id
+                ?? row.feature?.id
+                ?? row.feature?.properties?.userdata?.object_id
+                ?? row.feature?.properties?.id
+                ?? row.feature?.properties?.userdata?.id;
+            const paperItem = (key != null ? keyedItems.get(key) : null) || null;
+            row.paperItem = paperItem;
+            if (!paperItem) return;
+            // Redux geometry and styles are authoritative. Paper may still be
+            // catching up with a remote update and must not overwrite the row.
+            if (this.toolkit.dataStore?.reduxEnabled) return;
+            // Keep GeoJS style/geometry aligned with live Paper (source of truth).
+            try {
+                const live = paperItemToFeature(paperItem, key);
+                if (!live?.geometry) return;
+                row.feature = {
+                    ...row.feature,
+                    id: row.feature?.id ?? live.id ?? key,
+                    geometry: live.geometry,
+                    properties: {
+                        ...(row.feature?.properties || {}),
+                        ...(live.properties || {}),
+                        id: row.feature?.properties?.id ?? live.properties?.id ?? key,
+                        userdata: {
+                            ...(row.feature?.properties?.userdata || {}),
+                            ...(live.properties?.userdata || {}),
+                            object_id: row.feature?.properties?.userdata?.object_id
+                                || live.properties?.userdata?.object_id
+                                || key,
+                        },
+                    },
+                };
+            } catch {
+                // Leave store feature if Paper export fails.
+            }
         });
     }
 
@@ -2895,10 +3299,23 @@ class GeoJSDisplay {
         return !!item && (item === this._activePaperItem || item.selected);
     }
 
+    _rowIsLiveSessionAnnotation(row, item = null) {
+        const paperItem = item || this._findPaperItem(row);
+        if (row?.directEmbedding || paperItem?.data?.wsvvEmbeddingGrid) return false;
+        return Boolean(
+            paperItem?.data?.userdata?.object_id
+            || row?.feature?.properties?.userdata?.object_id,
+        );
+    }
+
     _rowShouldRenderInGeoJS(row) {
+        if (row?.collection?.properties?.hidden || row?.feature?.properties?.hidden) return false;
+        if (!this._supportsGeoJSGeometry(row.feature)) return false;
         if (row?.directEmbedding) {
-            return !this._embeddingGridLineStyle.hide_unselected || this._rowIsSelected(row);
+            return !this._embeddingGridLineStyle.hide_unselected || this._rowIsSelected(row)
+                || Boolean(this._peerSelectionColors?.has(String(this._embeddingRowId(row))));
         }
+        // Every annotation uses the same selection handoff on every client.
         return !this._paperItemShouldRender(this._findPaperItem(row));
     }
 
@@ -2950,16 +3367,93 @@ class GeoJSDisplay {
         this.scheduleUpdate();
     }
 
-    _syncPaperVisibilityForSelection() {
-        if (!this.options.hidePaperItems || !this._featureRows.length) return;
-        const items = this._paperItems.length ? this._paperItems : this._refreshPaperItemCache();
-        items.forEach((item) => {
-            let row = this._rowByPaperItem.get(item);
-            if (!row) {
-                row = this._featureRows.find((candidate) => this._rowMatchesPaperItem(candidate, item)) || null;
+    _hasGeoJSRowForPaperItem(item) {
+        if (!item) return false;
+        const matched = this._rowByPaperItem.get(item);
+        if (matched) return this._supportsGeoJSGeometry(matched.feature);
+        return this._featureRows.some((row) => (
+            this._supportsGeoJSGeometry(row.feature) && (row?.paperItem === item || this._rowMatchesPaperItem(row, item))
+        ));
+    }
+
+    _supportsGeoJSGeometry(feature) {
+        const geometry = feature?.geometry;
+        return geometry?.type !== 'GeometryCollection' && geometry?.properties?.subtype !== 'Measurement';
+    }
+
+    _setLivePaperPaintHidden(item, hidden) {
+        if (!item) return;
+        item.data = item.data || {};
+        const applyHidden = (target) => {
+            if (!target) return;
+            if (hidden) {
+                if (target.data?._wsvvLivePaintStyle == null) {
+                    target.data = target.data || {};
+                    target.data._wsvvLivePaintStyle = {
+                        opacity: target.opacity == null ? 1 : target.opacity,
+                        strokeOpacity: target.strokeOpacity,
+                        fillOpacity: target.fillOpacity,
+                    };
+                }
+                target.opacity = 0;
+                target.strokeOpacity = 0;
+                target.fillOpacity = 0;
+                if (target.style) {
+                    target.style.strokeOpacity = 0;
+                    target.style.fillOpacity = 0;
+                }
+            } else if (target.data?._wsvvLivePaintStyle) {
+                const saved = target.data._wsvvLivePaintStyle;
+                target.opacity = saved.opacity;
+                if (saved.strokeOpacity != null) target.strokeOpacity = saved.strokeOpacity;
+                if (saved.fillOpacity != null) target.fillOpacity = saved.fillOpacity;
+                if (target.style) {
+                    if (saved.strokeOpacity != null) target.style.strokeOpacity = saved.strokeOpacity;
+                    if (saved.fillOpacity != null) target.style.fillOpacity = saved.fillOpacity;
+                }
+                delete target.data._wsvvLivePaintStyle;
             }
-            const renderedByGeoJS = row ? this._lastRenderedRowIds.has(row.id) : false;
-            this._setPaperItemVisible(item, this._paperItemShouldRender(item) || !renderedByGeoJS);
+        };
+        applyHidden(item);
+        (item.children || []).forEach((child) => applyHidden(child));
+    }
+
+    /**
+     * Hand a Paper annotation off to GeoJS immediately so the controller and
+     * followers both paint the same screen-pixel sized feature.
+     */
+    promoteLivePaperItem(item) {
+        if (!item?.data?.userdata?.object_id) return false;
+        this._paperItems = this._refreshPaperItemCache();
+        this._refreshFeatureRows();
+        this._setLivePaperPaintHidden(item, false);
+        this._setPaperItemVisible(item, this._paperItemShouldRender(item));
+        this._syncPaperVisibilityForSelection();
+        this.requestViewportUpdate({force: true});
+        this.paperScope?.view?.update?.();
+        return true;
+    }
+
+    _syncPaperVisibilityForSelection() {
+        if (!this.options.hidePaperItems) return;
+        const items = this._paperItems.length ? this._paperItems : this._refreshPaperItemCache();
+        if (!items.length) return;
+        items.forEach((item) => {
+            if (item?.data?.wsvvEmbeddingGrid || item?.data?.wsvvLazyGeoJSPaperItem) {
+                this._setPaperItemVisible(item, false);
+                return;
+            }
+            const selected = this._paperItemShouldRender(item);
+            const handedOffToGeoJS = this._hasGeoJSRowForPaperItem(item);
+            // Visibility is renderer state. Mutating opacity here leaked zero
+            // stroke opacity into exported GeoJSON, Redux, and other clients.
+            this._setLivePaperPaintHidden(item, false);
+            if (selected) {
+                this._setPaperItemVisible(item, true);
+                return;
+            }
+            // Keep Paper only when GeoJS has no row yet (brief window mid-create).
+            this._setPaperItemVisible(item, !handedOffToGeoJS);
         });
     }
 

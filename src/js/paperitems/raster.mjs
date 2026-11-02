@@ -97,9 +97,14 @@ class Raster extends AnnotationItem{
             raster = inputRaster.data;
         } else {
             raster = new paper.Raster(inputRaster.data);
-            raster.translate(inputRaster.center[0], inputRaster.center[1]);
-            raster.scale(inputRaster.scaling[0], inputRaster.scaling[1]);
-            raster.rotate(inputRaster.rotation);
+            const applyPlacement = () => {
+                raster.matrix.reset();
+                raster.position = new paper.Point(inputRaster.center || [0, 0]);
+                raster.scale(...(inputRaster.scaling || [1, 1]));
+                raster.rotate(inputRaster.rotation || 0);
+            };
+            if (raster.loaded) applyPlacement();
+            else raster.onLoad = applyPlacement;
         }
         
         this._rasterSelectedColor = new paper.Color(0,0,0,0);
@@ -111,7 +116,8 @@ class Raster extends AnnotationItem{
         let grp = new paper.Group([raster]);
         grp.updateFillOpacity = function(){
             paper.Group.prototype.updateFillOpacity.call(this);
-            raster.opacity = this.opacity * this._computedFillOpacity;
+            // Bitmap visibility is independent of the vector fill setting.
+            raster.opacity = 1;
             if(grp.clipped){
                 grp.children[0].fillColor = null;
             }
@@ -160,7 +166,7 @@ class Raster extends AnnotationItem{
      * @returns {Boolean} Whether this constructor supports the requested type/subtype
      */
     static supportsGeoJSONType(type, subtype){
-        return type.toLowerCase() === 'geometrycollection' && subtype?.toLowerCase() === 'raster';
+        return typeof type === 'string' && type.toLowerCase() === 'geometrycollection' && subtype?.toLowerCase() === 'raster';
     }
 
     /**

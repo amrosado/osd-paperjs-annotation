@@ -45,6 +45,7 @@ import { Placeholder } from './paperitems/placeholder';
 import { OpenSeadragon } from './osd-loader';
 import { convertFaIcons } from './utils/faIcon';
 import { paper } from './paperjs';
+import { confirmAppModal } from '../../../helpers/appModal.js';
 
 /**
  * A user interface for managing feature collections. The FeatureCollectionUI class provides a user
@@ -95,7 +96,7 @@ class FeatureCollectionUI{
 
         this.group = group;
         // add paperjs event handlers
-        this.group.on({
+        this._groupHandlers = {
             'selection:mouseenter':()=>{
                 this.element.classList.add('svg-hovered');
                 this.element.dispatchEvent(new Event('mouseover'));
@@ -122,10 +123,12 @@ class FeatureCollectionUI{
                 let featureUI = ev.item.FeatureUI || new FeatureUI(ev.item, opts);
                 this._addFeature(featureUI);
             }
-        });
+        };
+        this.group.on(this._groupHandlers);
 
         // expose this object as a property of the paper.js group
         this.group.featureCollectionUI = this;
+        this._options = opts;
 
         
         this.remove = ()=>{
@@ -147,10 +150,11 @@ class FeatureCollectionUI{
          * @returns {jQuery} The jQuery object of the feature element.
          */
         this._addFeature = f => {
-            f.paperItem.updateFillOpacity();
+            f.paperItem.updateFillOpacity?.();
             this._featurelist.appendChild(f.element);
             this._sortableDebounce && window.clearTimeout(this._sortableDebounce);
-            self._sortableDebounce = window.setTimeout(()=>this._dragAndDrop.refresh(), 15);
+            this._sortableDebounce = window.setTimeout(()=>this._dragAndDrop.refresh(), 15);
+            this._updateCount();
             return f.element; 
         }
         /**
@@ -174,11 +178,11 @@ class FeatureCollectionUI{
             //define a new feature
             let props = this.group.defaultStyle;
             let clonedProperties = {
-                fillColor:new paper.Color(props.fillColor),
-                strokeColor:new paper.Color(props.strokeColor),
+                fillColor: null,
+                strokeColor: props.strokeColor ? new paper.Color(props.strokeColor) : new paper.Color('black'),
                 rescale:OpenSeadragon.extend(true,{},props.rescale),
-                fillOpacity:props.fillOpacity,
-                strokeOpacity:props.strokeOpacity,
+                fillOpacity: 0,
+                strokeOpacity: props.strokeOpacity != null ? props.strokeOpacity : 1,
                 strokeWidth:props.strokeWidth,
             }
             let placeholder = new Placeholder(clonedProperties);
@@ -202,7 +206,7 @@ class FeatureCollectionUI{
         
         datastore.set(this.element, {featureCollection: this});
         
-        this.label = this.group.displayName;
+        this.updateLabel();
 
         this.element.addEventListener('click',ev=>{
             ev.stopPropagation();
@@ -241,7 +245,36 @@ class FeatureCollectionUI{
             item.select();
         });
 
+        this.syncFeatures();
         return this;
+    }
+
+    _updateCount() {
+        const count = this._featurelist.children.length;
+        this.element.querySelector('.num-annotations').textContent = count;
+        this.element.querySelector('.features-summary').dataset.numElements = count;
+    }
+
+    destroy() {
+        this.group.off(this._groupHandlers);
+        window.clearTimeout(this._sortableDebounce);
+        if (this.group.featureCollectionUI === this) delete this.group.featureCollectionUI;
+        this.remove();
+    }
+
+    syncFeatures() {
+        this.element.classList.toggle('annotation-hidden', !this.group.visible);
+        const items = (this.group.children || []).filter(item => item.isGeoJSONFeature || item.annotationItem);
+        const current = new Set(items);
+        for (const ui of this.features) {
+            if (!current.has(ui.paperItem)) ui.element.remove();
+        }
+        for (const item of items) {
+            const ui = item.FeatureUI || new FeatureUI(item, this._options);
+            if (ui.element.parentElement !== this._featurelist) this._addFeature(ui);
+            ui.updateLabel();
+        }
+        this._updateCount();
     }
     
     /**
@@ -277,25 +310,39 @@ class FeatureCollectionUI{
      * Update the label of the feature collection in the UI element.
      */
     updateLabel(){
-        this._editableName.setText(this.label);
+        if (this._editableName.element.classList.contains('editing')) return;
+        this._editableName.setText(this.label || 'Annotation Group');
     }
     /**
      * Toggle the visibility of the feature collection UI element and the paper group.
      */
     toggleVisibility(){
-        this.element.classList.toggle('annotation-hidden');
-        this.group.visible = !this.element.classList.contains('annotation-hidden');
+        const toolkit = this.group.project._scope.annotationToolkit;
+        const id = this.group.data?.userdata?.layer_id;
+        const collection = toolkit?.dataStore?.state?.featureCollections?.find(layer => layer.id === id);
+        if (collection) {
+            toolkit.dataStore.upsertFeatureCollection({...collection,
+                properties: {...collection.properties, hidden: !collection.properties?.hidden}}, {id}, {source: 'annotationSetVisibility'});
+        } else this.group.visible = !this.group.visible;
+        this.element.classList.toggle('annotation-hidden', !this.group.visible);
     }
     /**
      * Remove the paper layer associated with the feature collection.
      * @param {boolean} [confirm=true] - Whether to confirm before removing or not.
      */
-    removeLayer(confirm = true){
-        if(confirm && window.confirm('Remove this layer?')==true){
-            this.group.remove();
-        } else {
-
+    async removeLayer(confirm = true){
+        if(confirm){
+            const label = String(this.label || 'this layer');
+            const ok = await confirmAppModal({
+                title: 'Remove layer',
+                message: `Remove “${label}” and all of its annotations? This cannot be undone.`,
+                confirmLabel: 'Remove layer',
+                cancelLabel: 'Cancel',
+                variant: 'danger',
+            });
+            if(!ok) return;
         }
+        this.group.remove();
     }
     /**
      * Open the style editor for the feature collection.
