@@ -4,6 +4,7 @@ import { normalizeEmbeddingId } from '../../../helpers/embeddingIds.js';
 import { geo, map as GeoMap, util as geoUtil } from './geojs-loader.mjs';
 import { displayBoundsFromBounds } from './geojs-selection-helpers.mjs';
 import { normalizePointTextStyle, POINT_TEXT_MARKER_RADIUS, pointTextOffsetForMatrix } from './utils/pointTextStyle.mjs';
+import { displayStyleForFeature, subscribeAuthorColors } from '../../../helpers/annotationAuthors.js';
 
 const GEOJS_DISPLAY_Z_INDEX = '20';
 const PAPER_OVERLAY_Z_INDEX = '30';
@@ -286,6 +287,10 @@ function paperItemToFeature(item, id) {
 
 function geojsFeatureStyle(row, key, fallback) {
     const props = row.feature.properties || {};
+    if (!props.wsvvEmbeddingGrid && !row?.directEmbedding) {
+        const override = displayStyleForFeature(row.feature);
+        if (override && override[key] != null) return override[key];
+    }
     if (key === 'strokeWidth') {
         const logical = props.rescale?.strokeWidth ?? props.strokeWidth
             ?? row.collection.properties?.defaultStyle?.strokeWidth;
@@ -346,6 +351,10 @@ class GeoJSDisplay {
         this._worldItemCount = -1;
         this._ownsGeoJSMap = false;
         this._ownsGeoJSElement = false;
+        this._unsubscribeAuthorColors = subscribeAuthorColors(() => {
+            this._renderDataDirty = true;
+            this.scheduleUpdate();
+        });
         this._selectedEmbeddingIds = new Set();
         this._embeddingSelectionSignature = '';
         this._embeddingGridLineStyle = { hide_unselected: false, strokeOpacity: null, strokeWidth: null };
@@ -369,6 +378,8 @@ class GeoJSDisplay {
 
     destroy() {
         this.destroyed = true;
+        this._unsubscribeAuthorColors?.();
+        this._unsubscribeAuthorColors = null;
         if (this._animationFrame) {
             (globalThis.cancelAnimationFrame || globalThis.clearTimeout)(this._animationFrame);
         }

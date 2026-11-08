@@ -42,6 +42,7 @@ import { AnnotationToolkit } from '../annotationtoolkit.mjs';
 import { validateGeoJSONGeometry } from '../utils/geojsonGeometryShape.mjs';
 import { validatePaperItemShapeContract } from '../utils/paperItemShapeContract.mjs';
 import {newAnnotationId} from '../utils/annotationIdentity.mjs';
+import {cleanAuthor, currentAuthor} from '../../../../helpers/annotationAuthors.js';
 
 /**
  * Checklist for new AnnotationItem subclasses (see `convertPaperItemToAnnotation` + `toGeoJSONGeometry`):
@@ -127,14 +128,18 @@ class AnnotationItem{
         // Prefer logical rescale stroke so peers/GeoJS get screen-pixel weight,
         // not the post-applyRescale Paper coordinate value.
         const logicalStroke = Number(this.paperItem.rescale?.strokeWidth);
-        if (Number.isFinite(logicalStroke) && logicalStroke > 0) {
-            return {
-                ...style,
-                strokeWidth: logicalStroke,
-                rescale: {strokeWidth: logicalStroke},
-            };
-        }
-        return style;
+        const result = Number.isFinite(logicalStroke) && logicalStroke > 0
+            ? {...style, strokeWidth: logicalStroke, rescale: {strokeWidth: logicalStroke}}
+            : style;
+        // Author colors are a local view. Keep the drawn stroke and fill in saved geometry.
+        const authored = this.paperItem.data?.wsvvAuthorPaint ? this.paperItem.data.wsvvAuthoredStyle : null;
+        if (!authored) return result;
+        return {
+            ...result,
+            strokeColor: authored.strokeColor ?? result.strokeColor,
+            fillColor: authored.fillColor ?? null,
+            fillOpacity: authored.fillOpacity ?? 0,
+        };
     }
     // static getGeometry(){}
     static onTransform(){}
@@ -246,6 +251,15 @@ class AnnotationItem{
     toGeoJSONFeature(){
         const userdata = this.paperItem.data?.userdata;
         const objectId = userdata && typeof userdata === 'object' ? userdata.object_id : null;
+        let author = cleanAuthor(this.paperItem.data?.author);
+        if (!author && !this.paperItem.data?.wsvvAuthorLocked) {
+            author = currentAuthor();
+            if (author && this.paperItem.data) {
+                this.paperItem.data.author = author;
+                this.paperItem.data.wsvvAuthorLocked = true;
+                this.paperItem.FeatureUI?.updateAuthor?.();
+            }
+        }
         let geoJSON = {
             type:'Feature',
             id: objectId || undefined,
@@ -254,6 +268,7 @@ class AnnotationItem{
                 label:this.paperItem.displayName,
                 selected:this.paperItem.selected,
                 ...this.getStyleProperties(),
+                ...(author ? {author} : {}),
                 userdata,
             }
         }
@@ -374,7 +389,7 @@ class AnnotationItemFactory{
      * @returns {paper.Item|undefined} A paper.Item instance or undefined if no matching constructor is found.
      * @description This static method creates an AnnotationItem instance from a GeoJSON feature. It retrieves a matching constructor based on the GeoJSON geometry type and subtype, and then creates an AnnotationItem instance using that constructor.
      */
-    static itemFromGeoJSON(geoJSON){ 
+    static itemFromGeoJSON(geoJSON, options = {}){ 
         if(GeometryTypes.includes(geoJSON.type)){
             geoJSON = {
                 type: 'Feature',
@@ -386,8 +401,15 @@ class AnnotationItemFactory{
         if(ctor){
             const userdata = {...geoJSON.properties?.userdata,
                 object_id: geoJSON.properties?.userdata?.object_id || geoJSON.id || newAnnotationId()};
-            let annotationItem = new ctor({...geoJSON, properties: {...geoJSON.properties, userdata}});
+            const properties = {...geoJSON.properties, userdata};
+            delete properties.wsvvAssignAuthor;
+            let annotationItem = new ctor({...geoJSON, properties});
             annotationItem.paperItem.data.userdata = userdata;
+            const author = cleanAuthor(geoJSON.properties?.author);
+            const incomingId = geoJSON.id || geoJSON.properties?.userdata?.object_id || geoJSON.properties?.id;
+            annotationItem.paperItem.data.author = author || null;
+            const imported = Boolean(author) || Boolean(incomingId);
+            annotationItem.paperItem.data.wsvvAuthorLocked = options.lockAuthor === false ? false : imported || options.lockAuthor === true;
             return annotationItem.paperItem;
         }
     }
@@ -406,7 +428,8 @@ class AnnotationItemFactory{
         const geoJSON = item.annotationItem.toGeoJSONFeature();
         geoJSON.id = newAnnotationId();
         geoJSON.properties.userdata = {...geoJSON.properties.userdata, object_id: geoJSON.id};
-        return AnnotationItemFactory.itemFromGeoJSON(geoJSON);
+        delete geoJSON.properties.author;
+        return AnnotationItemFactory.itemFromGeoJSON(geoJSON, {lockAuthor: false});
     }
 
 }

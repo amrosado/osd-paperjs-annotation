@@ -137,6 +137,19 @@
 .feature-item{
     margin-left:1em;
 }
+.feature-author{
+    margin-left:0.35em;
+    max-width:8rem;
+    overflow:hidden;
+    color:#4b2e83;
+    font-size:0.75em;
+    font-weight:650;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
+.feature-author[hidden]{
+    display:none;
+}
 
 .feature-collection [data-action], .feature [data-action]{
     margin-left:0.2em;

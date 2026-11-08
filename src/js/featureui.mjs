@@ -40,6 +40,7 @@ import {EditableContent} from './utils/editablecontent';
 import { domObjectFromHTML } from './utils/domObjectFromHTML';
 import { datastore } from './utils/datastore';
 import { convertFaIcons } from './utils/faIcon';
+import {authorLabel} from '../../../helpers/annotationAuthors.js';
 
 /**
  * A user interface for managing features.
@@ -63,6 +64,7 @@ class FeatureUI{
         this.paperItem.FeatureUI = this;
         this._editableName = new EditableContent();
         el.querySelector('.feature-item.name').appendChild(this._editableName.element);
+        this._author = el.querySelector('.feature-author');
         this._editableName.onChanged = text => {
             this.setLabel(text,'user-defined');
         };
@@ -165,6 +167,18 @@ class FeatureUI{
         if (this._editableName.element.classList.contains('editing')) return;
         // this._element.find('.feature-item.name').text(this.label);//.trigger('value-changed',[l]);
         this._editableName.setText(this.label);
+        this.updateAuthor();
+    }
+    /**
+     * Show the person who created this annotation, separate from its name.
+     */
+    updateAuthor(){
+        if (!this._author) return;
+        const label = authorLabel(this.paperItem?.data?.author);
+        this._author.textContent = label;
+        this._author.hidden = !label;
+        const username = this.paperItem?.data?.author?.username;
+        this._author.title = username && username !== label ? username : 'Annotation author';
     }
     /**
      * Remove the paper item associated with the feature.
@@ -259,6 +273,7 @@ function makeFeatureElement(){
         <div class='annotation-header hoverable-actions'>
             <span class='onhover fa-solid fa-crop-simple bounding-element' data-action="bounds" title='Bounding element'></span>
             <span class='feature-item name'></span>
+            <span class='feature-author' hidden></span>
             <span class='onhover fa-solid fa-palette' data-action='style' title='Open style editor'></span>
             <span class='fa-solid fa-binoculars' data-action='zoom-to' title='Go to this object'></span>
             <span class='onhover fa-solid fa-trash-can' data-action='trash' title='Remove'></span>
